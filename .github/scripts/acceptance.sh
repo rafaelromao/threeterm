@@ -25,6 +25,7 @@ ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
 OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
+JOURNEY_EVIDENCE="${CARGO_TARGET_DIR}/api-journey-coverage/api-journey-coverage.json"
 EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
 EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
 EXPECTED_OCCT_WORKER_SCHEMA='threeterm.workers.occt/1'
@@ -48,7 +49,7 @@ if ! mkdir -p "${LOG_ROOT}"; then
     exit 1
 fi
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE JOURNEY_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
 export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
@@ -511,6 +512,7 @@ for log in "${GATE_LOGS[@]}"; do
 done
 add_artifact "${NATIVE_MANIFEST}"
 add_artifact "${OCCT_SMOKE_EVIDENCE}"
+add_artifact "${JOURNEY_EVIDENCE}"
 add_artifact "${LIBSLVS_ARTIFACT}/${ARTIFACT_MANIFEST_RELATIVE##*/}"
 add_artifact "${SCHEMA_RESPONSE}"
 add_artifact "${SCHEMA_PROJECT}/manifest.json"
@@ -641,6 +643,19 @@ if [[ ! -f "${OCCT_SMOKE_EVIDENCE}" ]] || ! jq -e '
       "${OCCT_SMOKE_EVIDENCE}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
+if [[ ! -f "${JOURNEY_EVIDENCE}" ]] || ! jq -e '
+    . as $root |
+    .schema_version == "threeterm.evidence.api-journey-coverage/1" and
+    .test == "e2e_stl_api_all_tools_l_bracket" and
+    .recipe_schema_version == "threeterm.recipe.bracket-complete/1" and
+    (.required_commands | type == "array" and length == 18) and
+    (.executions | type == "array" and length >= 18) and
+    all(.executions[]; (.command | type == "string" and length > 0) and .outcome == "ok") and
+    all($root.required_commands[];
+        . as $command | any($root.executions[]; .command == $command and .outcome == "ok"))
+    ' "${JOURNEY_EVIDENCE}" >/dev/null 2>&1; then
+    EVIDENCE_VALID=false
+fi
 if [[ "${NATIVE_MANIFEST_VERIFIED}" != true ]]; then
     EVIDENCE_VALID=false
 fi
@@ -678,7 +693,7 @@ if [[ "${WORKERS}" == '{}' ]] || ! jq -e '
     ' <<<"${WORKERS}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
-for evidence_path in "${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json" \
+for evidence_path in "${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${JOURNEY_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json" \
     "${SCHEMA_RESPONSE}" "${SCHEMA_PROJECT}/manifest.json"; do
     evidence_relative="$(relative_artifact_path "${evidence_path}" || true)"
     if [[ -z "${evidence_relative}" ]] || ! jq -e --arg path "${evidence_relative}" '

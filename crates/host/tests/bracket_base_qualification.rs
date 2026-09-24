@@ -2901,6 +2901,25 @@ fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str) {
     }));
 }
 
+fn journey_evidence_root() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("api-journey-coverage")
+}
+
+fn write_journey_evidence(path: &Path, evidence: &Value) {
+    let parent = path.parent().expect("journey evidence has a parent");
+    fs::create_dir_all(parent).expect("journey evidence directory creates");
+    let temporary = parent.join(format!(".api-journey-coverage-{}.tmp", std::process::id()));
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(evidence).expect("journey evidence serializes"),
+    )
+    .expect("journey evidence writes");
+    fs::rename(&temporary, path).expect("journey evidence publishes atomically");
+}
+
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_api_all_tools_l_bracket() {
@@ -3167,18 +3186,17 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "retained per-tool evidence lacks an ok outcome for {required}"
         );
     }
-    let evidence_path = workspace.parent.join("api-journey-coverage.json");
-    fs::write(
+    let evidence_path = journey_evidence_root().join("api-journey-coverage.json");
+    write_journey_evidence(
         &evidence_path,
-        serde_json::to_vec_pretty(&json!({
+        &json!({
+            "schema_version": "threeterm.evidence.api-journey-coverage/1",
             "test": "e2e_stl_api_all_tools_l_bracket",
             "recipe_schema_version": recipe["schema_version"],
             "required_commands": REQUIRED_JOURNEY_COMMANDS,
             "executions": evidence,
-        }))
-        .expect("journey evidence serializes"),
-    )
-    .expect("journey evidence file writes");
+        }),
+    );
     let retained: Value =
         serde_json::from_slice(&fs::read(&evidence_path).expect("journey evidence file reads"))
             .expect("journey evidence file parses");
@@ -3198,4 +3216,9 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "retained evidence omits ok outcome for {required}"
         );
     }
+    drop(workspace);
+    assert!(
+        evidence_path.is_file(),
+        "retained journey evidence survives workspace cleanup"
+    );
 }

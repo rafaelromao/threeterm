@@ -3098,6 +3098,17 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "fresh-host reopen preserves {field} after save"
         );
     }
+    let reopened_identity = command_response(
+        &reopened_host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    for field in ["revision_hash", "feature_graph_hash", "transaction_count"] {
+        assert_eq!(
+            reopened_identity[field], closed_identity[field],
+            "fresh-host reopen preserves {field} after save"
+        );
+    }
 
     let validated = command_response(
         &reopened_host,

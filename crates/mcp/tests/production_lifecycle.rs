@@ -9,7 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::bracket_oracle::{
-    assert_complete_intents, assert_reinforcement_intents, recipe_steps, selected_edge_from_recipe,
+    assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents, mesh_number,
+    recipe_steps, selected_edge_from_recipe,
 };
 use threeterm_host::stl_integrity::{self, StlFormat};
 use threeterm_occt_worker::OcctWorker;
@@ -1296,6 +1297,82 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         loaded["feature_graph_hash"],
         reloaded_identity["feature_graph_hash"]
     );
+
+    let validated = restarted.call_tool(
+        "validate",
+        find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "complete-bracket",
+        }),
+    );
+    let validated = structured_tool_success(&validated, "validate");
+    validate(
+        &find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .response_schema,
+        &validated,
+    )
+    .expect("MCP validate response validates");
+    assert_eq!(validated["status"], "ok", "MCP validate succeeds");
+    assert_eq!(
+        validated["valid"], true,
+        "MCP validate accepts complete-bracket"
+    );
+    assert_eq!(validated["feature_id"], "complete-bracket");
+    assert_eq!(validated["revision_hash"], finished_revision);
+    assert_eq!(validated["feature_graph_hash"], finished_graph_hash);
+
+    assert!(
+        !export_root.exists(),
+        "export destination stays absent before export"
+    );
+    let exported = restarted.call_tool(
+        "export",
+        find(EXPORT_COMMAND_ID)
+            .expect("export is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "complete-bracket",
+            "formats": ["stl"],
+            "output_dir": export_root.to_string_lossy(),
+            "tessellation_deflection": mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
+            "override_warnings": false,
+            "accept_stale_geometry": false,
+        }),
+    );
+    let exported = structured_tool_success(&exported, "export");
+    validate(
+        &find(EXPORT_COMMAND_ID)
+            .expect("export is registered")
+            .response_schema,
+        &exported,
+    )
+    .expect("MCP export response validates");
+    assert_eq!(exported["status"], "ok", "MCP export succeeds");
+    assert_eq!(exported["feature_id"], "complete-bracket");
+    assert_eq!(exported["source_revision_id"], finished_revision);
+
+    let stl_path = export_root.join("complete-bracket.stl");
+    assert!(stl_path.is_file(), "journey STL exists after MCP export");
+    assert_eq!(
+        exported["artifacts"],
+        json!([stl_path.to_string_lossy()]),
+        "MCP export reports the journey STL artifact"
+    );
+
+    let report = stl_integrity::verify_path(&stl_path)
+        .expect("journey STL passes independent integrity verification");
+    let mesh = stl_integrity::observe_path(&stl_path).expect("journey STL observations parse");
+    assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
+        panic!(
+            "journey bracket mesh failed landmark {}: {failure}",
+            failure.landmark
+        )
+    });
 
     let second_evidence = restarted.finish();
     assert!(second_evidence.server_diagnostics.is_empty());

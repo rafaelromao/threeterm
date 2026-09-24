@@ -2868,3 +2868,120 @@ fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
         .expect_err("valid closed mesh of the wrong part must be rejected");
     assert_eq!(failure.landmark, "envelope");
 }
+
+const REQUIRED_JOURNEY_COMMANDS: &[&str] = &[
+    "list",
+    "new-project",
+    "extrude",
+    "boolean-fuse",
+    "fillet",
+    "chamfer",
+    "hole",
+    "revolve",
+    "mirror",
+    "linear-pattern",
+    "circular-pattern",
+    "shell",
+    "draft",
+    "loft",
+    "save",
+    "load",
+    "validate",
+    "export",
+];
+
+fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str) {
+    let registered = schema::find_by_name(command_name)
+        .unwrap_or_else(|| panic!("evidence references unknown command {command_name}"));
+    evidence.push(json!({
+        "command": command_name,
+        "request_schema_version": registered.request_schema_version,
+        "role": role,
+        "outcome": "ok",
+    }));
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn e2e_stl_api_all_tools_l_bracket() {
+    let recipe: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    assert_complete_recipe_structure(&recipe);
+
+    let workspace = QualificationWorkspace::new();
+    assert!(
+        !workspace.root.exists(),
+        "journey starts with no project fixture"
+    );
+
+    let host = Host::new();
+    let mut evidence: Vec<Value> = Vec::new();
+
+    let listed = command_response(&host, "list", json!({}));
+    let listed = listed.as_array().expect("list response is a command array");
+    let registered: Vec<_> = schema::iter().collect();
+    assert_eq!(
+        listed.len(),
+        registered.len(),
+        "list advertises every registered command"
+    );
+    for command in registered {
+        let entry = listed
+            .iter()
+            .find(|item| item["id"] == command.id.0)
+            .unwrap_or_else(|| panic!("discovery omits registered command {}", command.id.0));
+        assert_eq!(
+            entry["name"], command.name,
+            "discovery name for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["schema_version"], command.schema_version,
+            "discovery schema version for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["request_schema_version"], command.request_schema_version,
+            "discovery request schema version for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["response_schema_version"], command.response_schema_version,
+            "discovery response schema version for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["request_schema"], command.request_schema,
+            "discovery request schema for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["response_schema"], command.response_schema,
+            "discovery response schema for {}",
+            command.id.0
+        );
+    }
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        assert!(
+            listed.iter().any(|item| item["name"] == *required),
+            "discovery omits required journey command {required}"
+        );
+    }
+    record_evidence(&mut evidence, "list", "discovery");
+
+    command_response(
+        &host,
+        "new-project",
+        json!({"destination": workspace.root.to_string_lossy()}),
+    );
+    record_evidence(&mut evidence, "new-project", "project-create");
+
+    let empty = Bundle::at(&workspace.root)
+        .open()
+        .expect("journey project opens");
+    assert!(empty.log.is_empty(), "journey starts with an empty log");
+    assert!(
+        empty.graph.features().next().is_none(),
+        "journey starts with no model fixture"
+    );
+}

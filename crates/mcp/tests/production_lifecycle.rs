@@ -1222,9 +1222,83 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         recipe_steps(&recipe).len(),
         "journey feature graph retains every recipe feature"
     );
+    let finished_revision = revision.clone();
+    let finished_graph_hash = saved.feature_graph_hash_hex().to_string();
+    let finished_transaction_count = saved.manifest.transaction_count;
 
-    let evidence = client.finish();
-    assert!(evidence.server_diagnostics.is_empty());
-    assert!(evidence.protocol_errors.is_empty());
-    assert!(evidence.domain_errors.is_empty());
+    let first_evidence = client.finish();
+    assert!(first_evidence.server_diagnostics.is_empty());
+    assert!(first_evidence.protocol_errors.is_empty());
+    assert!(first_evidence.domain_errors.is_empty());
+
+    let mut restarted = McpProcess::spawn();
+    let reinitialized = restarted.request(
+        "restart-initialize",
+        "initialize",
+        json!({
+            "protocolVersion": PINNED_MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "threeterm-mcp-e2e-journey", "version": "1.0.0"}
+        }),
+    );
+    let reinitialize_result = assert_protocol_success(&reinitialized, "restart-initialize");
+    assert_eq!(
+        reinitialize_result["protocolVersion"],
+        PINNED_MCP_PROTOCOL_VERSION
+    );
+    restarted.notify("notifications/initialized", json!({}));
+
+    let loaded = restarted.call_tool(
+        "load",
+        find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let loaded = structured_tool_success(&loaded, "load");
+    validate(
+        &find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .response_schema,
+        &loaded,
+    )
+    .expect("MCP load response validates");
+    assert_eq!(loaded["revision_hash"], finished_revision);
+    assert_eq!(loaded["feature_graph_hash"], finished_graph_hash);
+
+    let reloaded_identity = restarted.call_tool(
+        "identity",
+        find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let reloaded_identity = structured_tool_success(&reloaded_identity, "identity");
+    validate(
+        &find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .response_schema,
+        &reloaded_identity,
+    )
+    .expect("MCP reloaded identity response validates");
+    assert_eq!(
+        reloaded_identity["transaction_count"], finished_transaction_count,
+        "reloaded identity reports every recipe transaction"
+    );
+    assert_eq!(
+        reloaded_identity["transaction_count"],
+        recipe["expectations"]["transaction_count"]
+    );
+    assert_eq!(reloaded_identity["revision_hash"], finished_revision);
+    assert_eq!(reloaded_identity["feature_graph_hash"], finished_graph_hash);
+    assert_eq!(loaded["revision_hash"], reloaded_identity["revision_hash"]);
+    assert_eq!(
+        loaded["feature_graph_hash"],
+        reloaded_identity["feature_graph_hash"]
+    );
+
+    let second_evidence = restarted.finish();
+    assert!(second_evidence.server_diagnostics.is_empty());
+    assert!(second_evidence.protocol_errors.is_empty());
+    assert!(second_evidence.domain_errors.is_empty());
 }

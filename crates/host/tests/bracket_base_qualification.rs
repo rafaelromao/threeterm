@@ -3098,4 +3098,93 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "fresh-host reopen preserves {field} after save"
         );
     }
+
+    let validated = command_response(
+        &reopened_host,
+        "validate",
+        json!({
+            "bundle_path": workspace.root.to_string_lossy(),
+            "feature_id": "complete-bracket",
+        }),
+    );
+    record_evidence(&mut evidence, "validate", "delivery-validation");
+    assert_eq!(validated["status"], "ok");
+    assert_eq!(validated["valid"], true);
+    assert_eq!(validated["revision_hash"], reopened["revision_hash"]);
+
+    let export_root = workspace.parent.join("journey-export");
+    let stl_path = export_root.join("complete-bracket.stl");
+    assert!(
+        !export_root.exists() && !stl_path.exists(),
+        "journey starts with no export fixture"
+    );
+    let exported = command_response(
+        &reopened_host,
+        "export",
+        export_request(
+            &workspace.root,
+            "complete-bracket",
+            &export_root,
+            mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
+        ),
+    );
+    record_evidence(&mut evidence, "export", "delivery-export");
+    assert_eq!(exported["status"], "ok");
+    assert_eq!(exported["feature_id"], "complete-bracket");
+    assert_eq!(exported["source_revision_id"], validated["revision_hash"]);
+    assert_eq!(exported["artifacts"], json!([stl_path.to_string_lossy()]));
+
+    let report =
+        verify_path(&stl_path).expect("journey STL passes independent integrity verification");
+    let mesh = observe_path(&stl_path).expect("journey STL observations parse");
+    assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
+        panic!(
+            "journey bracket mesh failed landmark {}: {failure}",
+            failure.landmark
+        )
+    });
+
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        assert!(
+            evidence.iter().any(|entry| entry["command"] == *required),
+            "retained per-tool evidence omits required command {required}"
+        );
+        assert!(
+            evidence
+                .iter()
+                .any(|entry| entry["command"] == *required && entry["outcome"] == "ok"),
+            "retained per-tool evidence lacks an ok outcome for {required}"
+        );
+    }
+    let evidence_path = workspace.parent.join("api-journey-coverage.json");
+    fs::write(
+        &evidence_path,
+        serde_json::to_vec_pretty(&json!({
+            "test": "e2e_stl_api_all_tools_l_bracket",
+            "recipe_schema_version": recipe["schema_version"],
+            "required_commands": REQUIRED_JOURNEY_COMMANDS,
+            "executions": evidence,
+        }))
+        .expect("journey evidence serializes"),
+    )
+    .expect("journey evidence file writes");
+    let retained: Value =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("journey evidence file reads"))
+            .expect("journey evidence file parses");
+    let retained_executions = retained["executions"]
+        .as_array()
+        .expect("retained evidence has executions");
+    assert_eq!(
+        retained_executions.len(),
+        evidence.len(),
+        "retained evidence keeps every execution"
+    );
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        assert!(
+            retained_executions
+                .iter()
+                .any(|entry| entry["command"] == *required && entry["outcome"] == "ok"),
+            "retained evidence omits ok outcome for {required}"
+        );
+    }
 }

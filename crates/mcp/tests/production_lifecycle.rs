@@ -8,19 +8,22 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_host::bracket_oracle::recipe_steps;
 use threeterm_host::stl_integrity::{self, StlFormat};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID,
-    NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID, VALIDATE_COMMAND_ID, find, iter,
+    BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID, VALIDATE_COMMAND_ID, find,
+    find_by_name, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
 const PINNED_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const NEW_PROJECT_TOOL: &str = "threeterm.command.new-project/1";
 const EXTRUDE_TOOL: &str = "threeterm.command.extrude/2";
+const COMPLETE_RECIPE: &str = include_str!("../../host/tests/data/bracket_complete_recipe.v1.json");
 
 type StreamLine = Result<Vec<u8>, String>;
 
@@ -985,4 +988,140 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
     }
     drop(_cleanup);
     assert!(!root.exists(), "lifecycle root remains after cleanup");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn e2e_stl_mcp_all_tools_l_bracket() {
+    let recipe: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    assert_eq!(
+        recipe_steps(&recipe).len(),
+        33,
+        "complete recipe has 33 steps"
+    );
+
+    let root = fresh_root();
+    let _cleanup = CleanupRoot(root.clone());
+    let project = root.join("project");
+    let export_root = root.join("export");
+    assert!(
+        !project.exists(),
+        "journey starts with no server-side project"
+    );
+    assert!(
+        !export_root.exists(),
+        "journey starts with no export fixture"
+    );
+
+    let mut client = McpProcess::spawn();
+    let initialized = client.request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocolVersion": PINNED_MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "threeterm-mcp-e2e-journey", "version": "1.0.0"}
+        }),
+    );
+    let initialize_result = assert_protocol_success(&initialized, "initialize");
+    assert_eq!(
+        initialize_result["protocolVersion"],
+        PINNED_MCP_PROTOCOL_VERSION
+    );
+    client.notify("notifications/initialized", json!({}));
+
+    let tools = advertised_tools(&mut client);
+    let tool_names = tools
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("advertised tool name is a string")
+        })
+        .collect::<HashSet<_>>();
+    let mut required_tools = vec![
+        find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .schema_version,
+        find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .schema_version,
+    ];
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("step has a command");
+        let registered = find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe references unknown command {command_name}"));
+        if !required_tools.contains(&registered.schema_version) {
+            required_tools.push(registered.schema_version);
+        }
+    }
+    for command_id in [LOAD_COMMAND_ID, VALIDATE_COMMAND_ID, EXPORT_COMMAND_ID] {
+        required_tools.push(
+            find(command_id)
+                .expect("lifecycle command is registered")
+                .schema_version,
+        );
+    }
+    for tool in &required_tools {
+        assert!(
+            tool_names.contains(tool),
+            "MCP discovery omits journey tool {tool}"
+        );
+    }
+
+    let created = client.call_tool(
+        "create",
+        find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .schema_version,
+        json!({"destination": project.to_string_lossy()}),
+    );
+    let created = structured_tool_success(&created, "create");
+    validate(
+        &find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .response_schema,
+        &created,
+    )
+    .expect("MCP new-project response validates");
+    let generation_id = created["generation_id"]
+        .as_str()
+        .expect("new-project returns a generation ID")
+        .to_string();
+    let initial_revision = assert_fresh_project(&project, &generation_id);
+
+    let identity = client.call_tool(
+        "identity",
+        find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let identity = structured_tool_success(&identity, "identity");
+    validate(
+        &find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .response_schema,
+        &identity,
+    )
+    .expect("MCP identity response validates");
+    assert_eq!(identity["transaction_count"], 0, "journey starts empty");
+    assert_eq!(
+        identity["revision_hash"], initial_revision,
+        "identity seeds the initial revision"
+    );
+
+    let empty = Bundle::at(&project).open().expect("journey project opens");
+    assert!(empty.log.is_empty(), "journey starts with an empty log");
+    assert!(
+        empty.graph.features().next().is_none(),
+        "journey starts with no features"
+    );
+    assert!(!export_root.exists(), "export destination starts absent");
+
+    let evidence = client.finish();
+    assert!(evidence.server_diagnostics.is_empty());
+    assert!(evidence.protocol_errors.is_empty());
+    assert!(evidence.domain_errors.is_empty());
 }

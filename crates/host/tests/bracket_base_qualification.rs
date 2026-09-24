@@ -3077,4 +3077,25 @@ fn e2e_stl_api_all_tools_l_bracket() {
         recipe_steps(&recipe).len(),
         "journey feature graph retains every recipe feature"
     );
+
+    let closed_identity = command_response(
+        &host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    drop(host);
+
+    let reopened_host = Host::new();
+    let reopened = command_response(
+        &reopened_host,
+        "load",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    record_evidence(&mut evidence, "load", "fresh-host-reopen");
+    for field in ["revision_hash", "feature_graph_hash"] {
+        assert_eq!(
+            reopened[field], closed_identity[field],
+            "fresh-host reopen preserves {field} after save"
+        );
+    }
 }

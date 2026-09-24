@@ -2825,11 +2825,20 @@ fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
     });
 
     let wrong = QualificationWorkspace::new();
-    Host::new()
-        .save_bracket(&wrong.root, "wrong-bracket", 60.0, 30.0, 40.0, 3.0)
-        .expect("wrong-part control saves through the production host");
     let wrong_export_root = wrong.parent.join("export");
     let wrong_host = Host::new();
+    command_response(
+        &wrong_host,
+        "bracket",
+        json!({
+            "bundle_path": wrong.root.to_string_lossy(),
+            "bracket_id": "wrong-bracket",
+            "length": 60.0,
+            "width": 30.0,
+            "height": 40.0,
+            "thickness": 3.0,
+        }),
+    );
     command_response(
         &wrong_host,
         "load",

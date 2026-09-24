@@ -132,6 +132,22 @@ pub struct StlIntegrityReport {
     pub material_volume: f64,
 }
 
+/// One decoded STL facet exposed for independent, read-only geometry probes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StlFacet {
+    pub vertices: [[f64; 3]; 3],
+}
+
+/// Parsed mesh observations. This deliberately contains no repaired or welded
+/// geometry; callers decide which independent measurements are appropriate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StlMeshObservation {
+    pub format: StlFormat,
+    pub facets: Vec<StlFacet>,
+    pub bounds_min: [f64; 3],
+    pub bounds_max: [f64; 3],
+}
+
 /// Verify an STL file without changing or repairing it.
 pub fn verify_path(path: impl AsRef<Path>) -> Result<StlIntegrityReport, StlIntegrityError> {
     let path = path.as_ref();
@@ -148,6 +164,46 @@ pub fn verify_path(path: impl AsRef<Path>) -> Result<StlIntegrityReport, StlInte
 pub fn verify_bytes(bytes: &[u8]) -> Result<StlIntegrityReport, StlIntegrityError> {
     let parsed = parse(bytes)?;
     verify_mesh(parsed)
+}
+
+/// Parse an STL for read-only geometric observations without repairing it.
+pub fn observe_path(path: impl AsRef<Path>) -> Result<StlMeshObservation, StlIntegrityError> {
+    let path = path.as_ref();
+    let bytes = fs::read(path).map_err(|error| {
+        StlIntegrityError::new(
+            IntegrityReason::Io,
+            format!("could not read {}: {error}", path.display()),
+        )
+    })?;
+    observe_bytes(&bytes)
+}
+
+/// Parse STL bytes for read-only geometric observations without repairing them.
+pub fn observe_bytes(bytes: &[u8]) -> Result<StlMeshObservation, StlIntegrityError> {
+    let parsed = parse(bytes)?;
+    let mut bounds_min = [f64::INFINITY; 3];
+    let mut bounds_max = [f64::NEG_INFINITY; 3];
+    let facets = parsed
+        .triangles
+        .into_iter()
+        .map(|triangle| {
+            for vertex in triangle.vertices {
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(vertex[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(vertex[axis]);
+                }
+            }
+            StlFacet {
+                vertices: triangle.vertices,
+            }
+        })
+        .collect();
+    Ok(StlMeshObservation {
+        format: parsed.format,
+        facets,
+        bounds_min,
+        bounds_max,
+    })
 }
 
 #[derive(Debug)]

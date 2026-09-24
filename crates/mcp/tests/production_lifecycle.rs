@@ -8,7 +8,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use threeterm_host::bracket_oracle::recipe_steps;
+use threeterm_host::bracket_oracle::{
+    assert_complete_intents, assert_reinforcement_intents, recipe_steps, selected_edge_from_recipe,
+};
 use threeterm_host::stl_integrity::{self, StlFormat};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
@@ -993,6 +995,8 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_mcp_all_tools_l_bracket() {
+    require_native_worker("e2e_stl_mcp_all_tools_l_bracket");
+
     let recipe: Value =
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
     assert_eq!(
@@ -1119,6 +1123,105 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         "journey starts with no features"
     );
     assert!(!export_root.exists(), "export destination starts absent");
+
+    let mut revision = initial_revision;
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("journey step command");
+        let feature_id = step["feature_id"].as_str().expect("journey feature ID");
+        let step_index = step["index"].as_u64().expect("journey step index");
+        let registered = find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe references unknown command {command_name}"));
+        let mut request = step["request"].clone();
+        request["bundle_path"] = project.to_string_lossy().into_owned().into();
+        if matches!(
+            command_name,
+            "extrude"
+                | "revolve"
+                | "fillet"
+                | "chamfer"
+                | "hole"
+                | "shell"
+                | "mirror"
+                | "linear-pattern"
+                | "circular-pattern"
+                | "draft"
+                | "loft"
+                | "save"
+        ) {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_from_recipe(
+                request["base_feature_id"]
+                    .as_str()
+                    .expect("finishing request has a base feature ID"),
+                &revision,
+                &step["edge_selection"],
+            );
+        }
+
+        let call_id = format!("step-{step_index}");
+        let response = client.call_tool(&call_id, registered.schema_version, request);
+        let response = structured_tool_success(&response, &call_id);
+        validate(&registered.response_schema, &response).unwrap_or_else(|error| {
+            panic!("step {feature_id} response violates its schema: {error}")
+        });
+        let next_revision = response["revision_hash"]
+            .as_str()
+            .expect("journey response has a revision hash")
+            .to_string();
+        assert_ne!(
+            next_revision, revision,
+            "step {feature_id} advances revision"
+        );
+        if command_name != "save" {
+            assert_eq!(response["status"], "ok", "step {feature_id} succeeds");
+            assert_eq!(response["operation"], command_name);
+            assert_eq!(response["feature_id"], feature_id);
+        }
+        revision = next_revision;
+    }
+
+    let expected_feature_ids: Vec<_> = recipe_steps(&recipe)
+        .iter()
+        .map(|step| step["feature_id"].as_str().expect("journey feature ID"))
+        .collect();
+    let saved = Bundle::at(&project)
+        .open()
+        .expect("journey bundle opens after the recipe");
+    assert_eq!(
+        saved.log.len(),
+        recipe_steps(&recipe).len(),
+        "journey retains every recipe transaction"
+    );
+    assert_eq!(
+        saved
+            .log
+            .entries()
+            .iter()
+            .map(|entry| entry.feature_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_feature_ids,
+        "journey log feature ids match the recipe order"
+    );
+    assert_eq!(
+        saved.manifest.transaction_count, recipe["expectations"]["transaction_count"],
+        "journey manifest counts every recipe transaction"
+    );
+    assert_reinforcement_intents(&recipe, &saved);
+    assert!(
+        saved.log.entries()[19..32]
+            .iter()
+            .all(|entry| entry.intent.is_some()),
+        "complete geometry steps retain canonical intents"
+    );
+    assert!(saved.log.entries()[32].intent.is_none());
+    assert_complete_intents(&recipe, &saved);
+    assert_eq!(
+        saved.graph.features().count(),
+        recipe_steps(&recipe).len(),
+        "journey feature graph retains every recipe feature"
+    );
 
     let evidence = client.finish();
     assert!(evidence.server_diagnostics.is_empty());

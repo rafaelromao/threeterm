@@ -308,7 +308,10 @@ fn threeterm_mcp_binary() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
         return PathBuf::from(path);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/threeterm-mcp")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
 }
 
 fn fresh_root() -> PathBuf {

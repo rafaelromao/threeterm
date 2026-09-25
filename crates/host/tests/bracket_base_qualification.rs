@@ -1945,3 +1945,357 @@ fn bracket_exported_mesh_geometry_qualifies_through_public_commands() {
         .expect_err("valid closed mesh of the wrong part must be rejected");
     assert_eq!(failure.landmark, "envelope");
 }
+
+const REQUIRED_JOURNEY_COMMANDS: &[&str] = &[
+    "list",
+    "new-project",
+    "extrude",
+    "boolean-fuse",
+    "fillet",
+    "chamfer",
+    "hole",
+    "revolve",
+    "mirror",
+    "linear-pattern",
+    "circular-pattern",
+    "shell",
+    "draft",
+    "loft",
+    "save",
+    "load",
+    "validate",
+    "export",
+];
+
+fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str) {
+    let registered = schema::find_by_name(command_name)
+        .unwrap_or_else(|| panic!("evidence references unknown command {command_name}"));
+    evidence.push(json!({
+        "command": command_name,
+        "request_schema_version": registered.request_schema_version,
+        "role": role,
+        "outcome": "ok",
+    }));
+}
+
+fn journey_evidence_root() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .join("api-journey-coverage")
+}
+
+fn write_journey_evidence(path: &Path, evidence: &Value) {
+    let parent = path.parent().expect("journey evidence has a parent");
+    fs::create_dir_all(parent).expect("journey evidence directory creates");
+    let temporary = parent.join(format!(".api-journey-coverage-{}.tmp", std::process::id()));
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(evidence).expect("journey evidence serializes"),
+    )
+    .expect("journey evidence writes");
+    fs::rename(&temporary, path).expect("journey evidence publishes atomically");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn e2e_stl_api_all_tools_l_bracket() {
+    let recipe: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    assert_complete_recipe_structure(&recipe);
+
+    let workspace = QualificationWorkspace::new();
+    assert!(
+        !workspace.root.exists(),
+        "journey starts with no project fixture"
+    );
+
+    let host = Host::new();
+    let mut evidence: Vec<Value> = Vec::new();
+
+    let listed = command_response(&host, "list", json!({}));
+    let listed = listed.as_array().expect("list response is a command array");
+    let registered: Vec<_> = schema::iter().collect();
+    assert_eq!(
+        listed.len(),
+        registered.len(),
+        "list advertises every registered command"
+    );
+    for command in registered {
+        let entry = listed
+            .iter()
+            .find(|item| item["id"] == command.id.0)
+            .unwrap_or_else(|| panic!("discovery omits registered command {}", command.id.0));
+        assert_eq!(
+            entry["name"], command.name,
+            "discovery name for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["schema_version"], command.schema_version,
+            "discovery schema version for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["request_schema_version"], command.request_schema_version,
+            "discovery request schema version for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["response_schema_version"], command.response_schema_version,
+            "discovery response schema version for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["request_schema"], command.request_schema,
+            "discovery request schema for {}",
+            command.id.0
+        );
+        assert_eq!(
+            entry["response_schema"], command.response_schema,
+            "discovery response schema for {}",
+            command.id.0
+        );
+    }
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        assert!(
+            listed.iter().any(|item| item["name"] == *required),
+            "discovery omits required journey command {required}"
+        );
+    }
+    record_evidence(&mut evidence, "list", "discovery");
+
+    command_response(
+        &host,
+        "new-project",
+        json!({"destination": workspace.root.to_string_lossy()}),
+    );
+    record_evidence(&mut evidence, "new-project", "project-create");
+
+    let empty = Bundle::at(&workspace.root)
+        .open()
+        .expect("journey project opens");
+    assert!(empty.log.is_empty(), "journey starts with an empty log");
+    assert!(
+        empty.graph.features().next().is_none(),
+        "journey starts with no model fixture"
+    );
+
+    let initial_identity = command_response(
+        &host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    let mut revision = initial_identity["revision_hash"]
+        .as_str()
+        .expect("journey identity has a revision hash")
+        .to_string();
+
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("journey step command");
+        let feature_id = step["feature_id"].as_str().expect("journey feature ID");
+        let mut request = step["request"].clone();
+        request["bundle_path"] = workspace.root.to_string_lossy().into_owned().into();
+        if matches!(
+            command_name,
+            "extrude"
+                | "revolve"
+                | "fillet"
+                | "chamfer"
+                | "hole"
+                | "shell"
+                | "mirror"
+                | "linear-pattern"
+                | "circular-pattern"
+                | "draft"
+                | "loft"
+                | "save"
+        ) {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_from_recipe(
+                request["base_feature_id"]
+                    .as_str()
+                    .expect("finishing request has a base feature ID"),
+                &revision,
+                &step["edge_selection"],
+            );
+        }
+
+        let response = command_response(&host, command_name, request);
+        let next_revision = response["revision_hash"]
+            .as_str()
+            .expect("journey response has a revision hash")
+            .to_string();
+        assert_ne!(
+            next_revision, revision,
+            "step {feature_id} advances revision"
+        );
+        if command_name != "save" {
+            assert_eq!(response["status"], "ok", "step {feature_id} succeeds");
+            assert_eq!(response["operation"], command_name);
+            assert_eq!(response["feature_id"], feature_id);
+        }
+        record_evidence(&mut evidence, command_name, feature_id);
+        revision = next_revision;
+    }
+
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        if matches!(*required, "load" | "validate" | "export") {
+            continue;
+        }
+        assert!(
+            evidence.iter().any(|entry| entry["command"] == *required),
+            "per-tool evidence omits required command {required}"
+        );
+    }
+
+    let saved = Bundle::at(&workspace.root)
+        .open()
+        .expect("journey bundle opens after the recipe");
+    assert_eq!(
+        saved.log.len(),
+        recipe_steps(&recipe).len(),
+        "journey retains every recipe transaction"
+    );
+    assert_reinforcement_intents(&recipe, &saved);
+    assert!(
+        saved.log.entries()[19..32]
+            .iter()
+            .all(|entry| entry.intent.is_some()),
+        "complete geometry steps retain canonical intents"
+    );
+    assert!(saved.log.entries()[32].intent.is_none());
+    assert_complete_intents(&recipe, &saved);
+    assert_eq!(
+        saved.graph.features().count(),
+        recipe_steps(&recipe).len(),
+        "journey feature graph retains every recipe feature"
+    );
+
+    let closed_identity = command_response(
+        &host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    drop(host);
+
+    let reopened_host = Host::new();
+    let reopened = command_response(
+        &reopened_host,
+        "load",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    record_evidence(&mut evidence, "load", "fresh-host-reopen");
+    for field in ["revision_hash", "feature_graph_hash"] {
+        assert_eq!(
+            reopened[field], closed_identity[field],
+            "fresh-host reopen preserves {field} after save"
+        );
+    }
+    let reopened_identity = command_response(
+        &reopened_host,
+        "identity",
+        json!({"bundle_path": workspace.root.to_string_lossy()}),
+    );
+    for field in ["revision_hash", "feature_graph_hash", "transaction_count"] {
+        assert_eq!(
+            reopened_identity[field], closed_identity[field],
+            "fresh-host reopen preserves {field} after save"
+        );
+    }
+
+    let validated = command_response(
+        &reopened_host,
+        "validate",
+        json!({
+            "bundle_path": workspace.root.to_string_lossy(),
+            "feature_id": "complete-bracket",
+        }),
+    );
+    record_evidence(&mut evidence, "validate", "delivery-validation");
+    assert_eq!(validated["status"], "ok");
+    assert_eq!(validated["valid"], true);
+    assert_eq!(validated["revision_hash"], reopened["revision_hash"]);
+
+    let export_root = workspace.parent.join("journey-export");
+    let stl_path = export_root.join("complete-bracket.stl");
+    assert!(
+        !export_root.exists() && !stl_path.exists(),
+        "journey starts with no export fixture"
+    );
+    let exported = command_response(
+        &reopened_host,
+        "export",
+        export_request(
+            &workspace.root,
+            "complete-bracket",
+            &export_root,
+            mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
+        ),
+    );
+    record_evidence(&mut evidence, "export", "delivery-export");
+    assert_eq!(exported["status"], "ok");
+    assert_eq!(exported["feature_id"], "complete-bracket");
+    assert_eq!(exported["source_revision_id"], validated["revision_hash"]);
+    assert_eq!(exported["artifacts"], json!([stl_path.to_string_lossy()]));
+
+    let report =
+        verify_path(&stl_path).expect("journey STL passes independent integrity verification");
+    let mesh = observe_path(&stl_path).expect("journey STL observations parse");
+    assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
+        panic!(
+            "journey bracket mesh failed landmark {}: {failure}",
+            failure.landmark
+        )
+    });
+
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        assert!(
+            evidence.iter().any(|entry| entry["command"] == *required),
+            "retained per-tool evidence omits required command {required}"
+        );
+        assert!(
+            evidence
+                .iter()
+                .any(|entry| entry["command"] == *required && entry["outcome"] == "ok"),
+            "retained per-tool evidence lacks an ok outcome for {required}"
+        );
+    }
+    let evidence_path = journey_evidence_root().join("api-journey-coverage.json");
+    write_journey_evidence(
+        &evidence_path,
+        &json!({
+            "schema_version": "threeterm.evidence.api-journey-coverage/1",
+            "test": "e2e_stl_api_all_tools_l_bracket",
+            "recipe_schema_version": recipe["schema_version"],
+            "required_commands": REQUIRED_JOURNEY_COMMANDS,
+            "executions": evidence,
+        }),
+    );
+    let retained: Value =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("journey evidence file reads"))
+            .expect("journey evidence file parses");
+    let retained_executions = retained["executions"]
+        .as_array()
+        .expect("retained evidence has executions");
+    assert_eq!(
+        retained_executions.len(),
+        evidence.len(),
+        "retained evidence keeps every execution"
+    );
+    for required in REQUIRED_JOURNEY_COMMANDS {
+        assert!(
+            retained_executions
+                .iter()
+                .any(|entry| entry["command"] == *required && entry["outcome"] == "ok"),
+            "retained evidence omits ok outcome for {required}"
+        );
+    }
+    drop(workspace);
+    assert!(
+        evidence_path.is_file(),
+        "retained journey evidence survives workspace cleanup"
+    );
+}

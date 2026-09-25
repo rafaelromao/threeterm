@@ -133,5 +133,6 @@ jobs:
             target/acceptance-run/logs
             target/acceptance-run/native-worker-manifest.json
             target/acceptance-run/occt-geometry-smoke/real-occt-geometry-smoke.json
+            target/acceptance-run/api-journey-coverage/api-journey-coverage.json
             target/acceptance-run/libslvs-artifact
           if-no-files-found: error

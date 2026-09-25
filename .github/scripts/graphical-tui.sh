@@ -58,6 +58,9 @@ LIFECYCLE_REVISION=''
 REINFORCING_TRANSCRIPT=''
 BRACKET_TRANSCRIPT=''
 BRACKET_STEPS_DIR=''
+ALL_TOOLS_TRANSCRIPT=''
+ALL_TOOLS_STEPS_DIR=''
+ALL_TOOLS_CANCEL_REVISION=''
 PROJECT_CREATED_SCREENSHOT=''
 EXTRUSION_COMMITTED_SCREENSHOT=''
 COLLAR_SCREENSHOT=''
@@ -136,6 +139,7 @@ Usage:
   graphical-tui.sh production_tui_mirror_pattern_reinforcing_features --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_tapered_lofted_reinforcements --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh production_tui_bracket_foundation --tui-binary PATH --project-root PATH --evidence-root PATH
+  graphical-tui.sh production_tui_all_tools_stl_journey --tui-binary PATH --project-root PATH --evidence-root PATH
   graphical-tui.sh --print-plan
   graphical-tui.sh --validate-viewport-evidence PATH
 
@@ -383,7 +387,7 @@ while (($# > 0)); do
             EVIDENCE_ROOT="$2"
             shift 2
             ;;
-        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation|production_tui_save_reopen_validate_export|production_tui_reinforcement|production_tui_mirror_pattern_reinforcing_features|production_tui_tapered_lofted_reinforcements|production_tui_bracket_foundation)
+        production_tui_ghostty_session|production_tui_create_project_extrude|production_tui_keyboard_navigation|production_tui_save_reopen_validate_export|production_tui_reinforcement|production_tui_mirror_pattern_reinforcing_features|production_tui_tapered_lofted_reinforcements|production_tui_bracket_foundation|production_tui_all_tools_stl_journey)
             [[ -z "${TEST_NAME:-}" ]] || { usage >&2; exit 2; }
             TEST_NAME="$1"
             if [[ "$TEST_NAME" == 'production_tui_create_project_extrude' ]]; then
@@ -408,6 +412,9 @@ while (($# > 0)); do
             elif [[ "$TEST_NAME" == 'production_tui_bracket_foundation' ]]; then
                 TEST_ID="$TEST_NAME"
                 SCHEMA_VERSION='threeterm.graphical-tui.bracket-foundation/1'
+            elif [[ "$TEST_NAME" == 'production_tui_all_tools_stl_journey' ]]; then
+                TEST_ID="$TEST_NAME"
+                SCHEMA_VERSION='threeterm.graphical-tui.all-tools-stl-journey/1'
             fi
             shift
             ;;
@@ -462,6 +469,25 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         path_failure_detail='fresh project launch root parent is not a directory'
         PROJECT_ROOT=''
     fi
+elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+    project_parent=''
+    if project_parent="$(cd "$(dirname "$PROJECT_ROOT")" 2>/dev/null && pwd)"; then
+        PROJECT_ROOT="${project_parent}/$(basename "$PROJECT_ROOT")"
+    else
+        path_failure_code='project_root_unavailable'
+        path_failure_detail='fresh all-tools journey root parent is not a directory'
+        PROJECT_ROOT=''
+    fi
+    [[ -e "$PROJECT_ROOT" ]] && {
+        path_failure_code='project_fixture_present'
+        path_failure_detail='all-tools journey must start with no project fixture'
+        PROJECT_ROOT=''
+    }
+    [[ -e "${EVIDENCE_ROOT}/../tui-export/complete-bracket.stl" ]] && {
+        path_failure_code='export_destination_exists'
+        path_failure_detail='all-tools journey must start with no export fixture'
+        PROJECT_ROOT=''
+    }
 elif PROJECT_ROOT="$(cd "$PROJECT_ROOT" 2>/dev/null && pwd)"; then
     :
 else
@@ -532,6 +558,18 @@ fi
 if [[ "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
     BRACKET_TRANSCRIPT="${EVIDENCE_ROOT}/bracket-transcript.jsonl"
     BRACKET_STEPS_DIR="${EVIDENCE_ROOT}/bracket-steps"
+fi
+if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+    ALL_TOOLS_TRANSCRIPT="${EVIDENCE_ROOT}/all-tools-transcript.jsonl"
+    ALL_TOOLS_STEPS_DIR="${EVIDENCE_ROOT}/all-tools-steps"
+    SAVE_SCREENSHOT="${EVIDENCE_ROOT}/save.png"
+    REOPEN_SCREENSHOT="${EVIDENCE_ROOT}/reopen.png"
+    VALIDATION_SCREENSHOT="${EVIDENCE_ROOT}/validation.png"
+    EXPORT_SCREENSHOT="${EVIDENCE_ROOT}/export.png"
+    SELECTION_SCREENSHOT="${EVIDENCE_ROOT}/selection.png"
+    STL_PATH="${EVIDENCE_ROOT}/../tui-export/complete-bracket.stl"
+    STL_INTEGRITY_EVIDENCE="${EVIDENCE_ROOT}/stl-integrity.json"
+    SECOND_TUI_STATUS_FILE="${EVIDENCE_ROOT}/second-tui-exit-status"
 fi
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     PROJECT_IDENTITY="${EVIDENCE_ROOT}/project-identity.json"
@@ -647,7 +685,8 @@ check_prerequisites() {
     if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ||
         "$TEST_ID" == 'production_tui_reinforcement' ||
         "$TEST_ID" == 'production_tui_tapered_lofted_reinforcements' ||
-        "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
+        "$TEST_ID" == 'production_tui_bracket_foundation' ||
+        "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
         OCCT_WORKER="${THREETERM_OCCTBUILD_WORKER:-}"
         if [[ -z "$OCCT_WORKER" ]]; then
             local target_root="${CARGO_TARGET_DIR:-${ROOT}/target}"
@@ -775,6 +814,11 @@ readiness_viewport_ready() {
             readiness_detail="viewport evidence did not satisfy the empty bracket-foundation contract: ${viewport_evidence}"
             return 1
         }
+    elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+        validate_bracket_startup_viewport_evidence "$viewport_evidence" || {
+            readiness_detail="viewport evidence did not satisfy the empty all-tools journey contract: ${viewport_evidence}"
+            return 1
+        }
     elif ! validate_viewport_evidence "$viewport_evidence"; then
         readiness_detail="viewport evidence did not satisfy the versioned saved-solid contract: ${viewport_evidence}"
         return 1
@@ -846,6 +890,8 @@ orbit_ready() {
         validate_reinforcement_viewport_evidence "$viewport_evidence" orbit || return 1
     elif [[ "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
         validate_bracket_viewport_evidence "$viewport_evidence" || return 1
+    elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+        validate_bracket_viewport_evidence "$viewport_evidence" complete-bracket || return 1
     else
         validate_viewport_evidence "$viewport_evidence" || return 1
     fi
@@ -854,7 +900,7 @@ orbit_ready() {
         "$TEST_ID" == 'production_tui_mirror_pattern_reinforcing_features' ]]; then
         [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" == "$(jq -r '.frame.revision' <<<"$viewport_workflow_evidence")" ]] || return 1
         [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$(jq -r '.frame.image_id' <<<"$viewport_workflow_evidence")" ]] || return 1
-    elif [[ "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
+    elif [[ "$TEST_ID" == 'production_tui_bracket_foundation' || "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
         [[ "$(jq -r '.frame.image_id' <<<"$viewport_evidence")" != "$(jq -r '.frame.image_id' <<<"$viewport_workflow_evidence")" ]] || return 1
         [[ "$(jq -r '.frame.revision' <<<"$viewport_evidence")" != "$startup_revision" ]] || return 1
     else
@@ -996,7 +1042,7 @@ start_ghostty() {
         --font-size=12 --quit-after-last-window=true -e bash "$WRAPPER" \
         "$(command -v script)" "$TUI_BINARY" "$PROJECT_ROOT" "$PTY_OUTPUT" "$PTY_INPUT" \
         "$TUI_STDERR" "$TUI_STATUS_FILE" "$SECOND_TUI_STATUS_FILE" \
-        "$([[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]] && printf 1 || printf 0)" &
+        "$([[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' || "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]] && printf 1 || printf 0)" &
     GHOSTTY_PID=$!
 }
 
@@ -1926,6 +1972,278 @@ run_bracket_foundation() {
     workflow_status='passed'
 }
 
+all_tools_save_step() {
+    local step_id="$1"
+    local viewport_feature="$2"
+    local request="$3"
+    local saved_bracket_transcript="$BRACKET_TRANSCRIPT"
+    local saved_bracket_steps="$BRACKET_STEPS_DIR"
+    BRACKET_TRANSCRIPT="$ALL_TOOLS_TRANSCRIPT"
+    BRACKET_STEPS_DIR="$ALL_TOOLS_STEPS_DIR"
+    local screenshot ocr image_id revision marker screenshot_sha
+    local before_preview_count before_commit_count
+    local preview_response commit_response commit_revision
+    local input_start_offset input_end_offset input_sha256
+    local -a marker_lines
+    bracket_step_index=$((bracket_step_index + 1))
+    screenshot="${BRACKET_STEPS_DIR}/$(printf '%02d' "$bracket_step_index")-${step_id}.png"
+    before_preview_count="$(grep -aFc "[dashed-outline] Preview: save" "$PTY_OUTPUT" 2>/dev/null || true)"
+    before_commit_count="$(grep -aFc "Save completed" "$PTY_OUTPUT" 2>/dev/null || true)"
+    input_start_offset="$(wc -c <"$PTY_INPUT" | tr -d '[:space:]')"
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed "could not open the palette for ${step_id}"
+    wtype save || die input_injection_failed "could not type save for ${step_id}"
+    wtype -k Return || die input_injection_failed "could not select save for ${step_id}"
+    wtype "$request" || die input_injection_failed "could not type ${step_id} request"
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed "could not preview ${step_id}"
+    wait_for_output_marker_count "[dashed-outline] Preview: save" "$((before_preview_count + 1))"
+    mapfile -t marker_lines < <(
+        tr '\r' '\n' <"$PTY_OUTPUT" | grep -aF "[dashed-outline] Preview: save" || true
+    )
+    preview_response="${marker_lines[${#marker_lines[@]}-1]}"
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed "could not commit ${step_id}"
+    wait_for_output_marker_count "Save completed" "$((before_commit_count + 1))"
+    mapfile -t marker_lines < <(
+        tr '\r' '\n' <"$PTY_OUTPUT" | grep -aF "Save completed" || true
+    )
+    commit_response="${marker_lines[${#marker_lines[@]}-1]}"
+    commit_revision="$(jq -r '.revision_hash' "$PROJECT_ROOT/manifest.json")"
+    [[ "$commit_revision" =~ ^[0-9a-f]{64}$ ]] ||
+        die "${step_id}_commit_response_invalid" "save did not persist a revision: ${commit_response}"
+    wait_until "$RUNNER_TIMEOUT_SECONDS" bracket_viewport_ready "$viewport_feature" ||
+        die "${step_id}_viewport_invalid" "viewport evidence did not advance for ${step_id}: ${viewport_evidence}"
+    capture_screenshot "$screenshot" || die "${step_id}_screenshot_failed" "screenshot was not retained for ${step_id}"
+    ocr="$(tesseract "$screenshot" stdout 2>/dev/null || true)"
+    grep -Fq "Viewport presented" <<<"$ocr" || die "${step_id}_viewport_marker_not_visible" "viewport marker was not visible for ${step_id}"
+    revision="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
+    image_id="$(jq -r '.frame.image_id' <<<"$viewport_evidence")"
+    input_end_offset="$(wc -c <"$PTY_INPUT" | tr -d '[:space:]')"
+    ((input_end_offset > input_start_offset)) ||
+        die "${step_id}_keyboard_input_missing" "no scoped keyboard input was recorded for ${step_id}"
+    input_sha256="$(sha256sum "$PTY_INPUT" | cut -d' ' -f1)"
+    screenshot_sha="$(sha256sum "$screenshot" | cut -d' ' -f1)"
+    jq -n \
+        --arg schema_version "$SCHEMA_VERSION" \
+        --arg step "$step_id" \
+        --arg command "save" \
+        --arg feature_id "$step_id" \
+        --arg input "$request" \
+        --arg preview_response "$preview_response" \
+        --arg commit_response "$commit_response" \
+        --arg commit_revision "$commit_revision" \
+        --arg pty_log "$PTY_INPUT" \
+        --argjson input_start_offset "$input_start_offset" \
+        --argjson input_end_offset "$input_end_offset" \
+        --arg input_sha256 "$input_sha256" \
+        --arg marker "Save completed" \
+        --arg revision "$revision" \
+        --arg screenshot "$screenshot" \
+        --arg screenshot_sha256 "$screenshot_sha" \
+        --argjson viewport "$viewport_evidence" \
+        '{schema_version:$schema_version,step:$step,command:$command,feature_id:$feature_id,input:$input,keyboard_input:{pty_log:$pty_log,start_offset:$input_start_offset,end_offset:$input_end_offset,log_sha256:$input_sha256},acknowledgement:{preview:$preview_response,commit:$commit_response,marker:$marker},revision:$revision,commit_revision:$commit_revision,frame:$viewport.frame,viewport_evidence:$viewport,screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+        >>"$BRACKET_TRANSCRIPT"
+    BRACKET_TRANSCRIPT="$saved_bracket_transcript"
+    BRACKET_STEPS_DIR="$saved_bracket_steps"
+}
+
+all_tools_model_step() {
+    local step_id="$1"
+    local command="$2"
+    local feature_id="$3"
+    local request="$4"
+    local saved_bracket_transcript="$BRACKET_TRANSCRIPT"
+    local saved_bracket_steps="$BRACKET_STEPS_DIR"
+    BRACKET_TRANSCRIPT="$ALL_TOOLS_TRANSCRIPT"
+    BRACKET_STEPS_DIR="$ALL_TOOLS_STEPS_DIR"
+    bracket_step "$step_id" "$command" "$feature_id" "$request"
+    BRACKET_TRANSCRIPT="$saved_bracket_transcript"
+    BRACKET_STEPS_DIR="$saved_bracket_steps"
+}
+
+run_all_tools_journey() {
+    [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]] || return 0
+    mkdir -p "$ALL_TOOLS_STEPS_DIR"
+    : >"$ALL_TOOLS_TRANSCRIPT"
+    bracket_previous_image_id="$startup_image_id"
+    local saved_bracket_transcript="$BRACKET_TRANSCRIPT"
+    local saved_bracket_steps="$BRACKET_STEPS_DIR"
+    BRACKET_TRANSCRIPT="$ALL_TOOLS_TRANSCRIPT"
+    BRACKET_STEPS_DIR="$ALL_TOOLS_STEPS_DIR"
+    local project_request
+    project_request="$(jq -n --arg destination "$PROJECT_ROOT" '{destination:$destination}')"
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open palette for new-project'
+    wtype new-project || die input_injection_failed 'could not type new-project'
+    wtype -k Return || die input_injection_failed 'could not select new-project'
+    wtype "$project_request" || die input_injection_failed 'could not type new-project request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview new-project'
+    wait_for_output_marker '[dashed-outline] Preview: new-project'
+    wtype -k Escape || die input_injection_failed 'could not cancel new-project draft'
+    wait_for_output_marker '[cancellation-glyph] Cancellation: command draft discarded'
+    [[ ! -e "$PROJECT_ROOT/manifest.json" ]] || die cancellation_mutated_project 'cancelled new-project draft created a project'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not reopen palette for new-project'
+    wtype new-project || die input_injection_failed 'could not retype new-project'
+    wtype -k Return || die input_injection_failed 'could not reselect new-project'
+    wtype "$project_request" || die input_injection_failed 'could not retype new-project request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview new-project commit'
+    wait_for_output_marker_count '[dashed-outline] Preview: new-project' 2
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'could not commit new-project'
+    wait_for_output_marker 'Project created:'
+    [[ -f "$PROJECT_ROOT/manifest.json" ]] || die project_not_created 'new-project commit did not create a manifest'
+    BRACKET_TRANSCRIPT="$saved_bracket_transcript"
+    BRACKET_STEPS_DIR="$saved_bracket_steps"
+    all_tools_model_step arm-x extrude arm-x \
+        '{"feature_id":"arm-x","profile":[[0.0,0.0],[60.0,0.0],[60.0,20.0],[0.0,20.0]],"height":8.0,"mode":"additive"}'
+    all_tools_model_step arm-z extrude arm-z \
+        '{"feature_id":"arm-z","profile":[[0.0,0.0],[20.0,0.0],[20.0,60.0],[0.0,60.0]],"height":8.0,"mode":"additive"}'
+    all_tools_model_step pad-a-seed extrude pad-a-seed \
+        '{"feature_id":"pad-a-seed","profile":[[24.0,4.0],[36.0,4.0],[36.0,16.0],[24.0,16.0]],"height":12.0,"mode":"additive"}'
+    local pad_a_edge pad_b_edge
+    pad_a_edge="$(bracket_edge_reference pad-a-seed pad-a-edge '[30.0,4.0,0.0]')"
+    all_tools_model_step pad-a fillet pad-a \
+        "$(jq -cn --argjson edge "$pad_a_edge" '{feature_id:"pad-a",base_feature_id:"pad-a-seed",radius:0.5,selected_edge:$edge}')"
+    all_tools_model_step pad-b-seed extrude pad-b-seed \
+        '{"feature_id":"pad-b-seed","profile":[[4.0,24.0],[16.0,24.0],[16.0,36.0],[4.0,36.0]],"height":12.0,"mode":"additive"}'
+    pad_b_edge="$(bracket_edge_reference pad-b-seed pad-b-edge '[10.0,24.0,0.0]')"
+    all_tools_model_step pad-b chamfer pad-b \
+        "$(jq -cn --argjson edge "$pad_b_edge" '{feature_id:"pad-b",base_feature_id:"pad-b-seed",distance:0.25,selected_edge:$edge}')"
+    all_tools_model_step bracket-l boolean-fuse bracket-l \
+        '{"feature_id":"bracket-l","base_feature_id":"arm-x","tool_feature_id":"arm-z"}'
+    all_tools_model_step bracket-lp1 boolean-fuse bracket-lp1 \
+        '{"feature_id":"bracket-lp1","base_feature_id":"bracket-l","tool_feature_id":"pad-a"}'
+    all_tools_model_step bracket-base boolean-fuse bracket-base \
+        '{"feature_id":"bracket-base","base_feature_id":"bracket-lp1","tool_feature_id":"pad-b"}'
+    all_tools_model_step bracket-hole-1 hole bracket-hole-1 \
+        '{"feature_id":"bracket-hole-1","base_feature_id":"bracket-base","position":[50.0,10.0,0.0],"direction":[0.0,0.0,1.0],"diameter":4.5,"hole_kind":"drilled"}'
+    all_tools_model_step bracket-foundation hole bracket-foundation \
+        '{"feature_id":"bracket-foundation","base_feature_id":"bracket-hole-1","position":[10.0,50.0,0.0],"direction":[0.0,0.0,1.0],"diameter":4.5,"hole_kind":"drilled"}'
+    all_tools_save_step foundation-snapshot bracket-foundation \
+        '{"feature_id":"foundation-snapshot","kind":"checkpoint"}'
+    local cancel_before_count cancel_before_revision cancel_before_digest
+    cancel_before_count="$(jq -r '.transaction_count' "$PROJECT_ROOT/manifest.json")"
+    cancel_before_revision="$(jq -r '.revision_hash' "$PROJECT_ROOT/manifest.json")"
+    cancel_before_digest="$(project_generation_digest "$PROJECT_ROOT")"
+    local revolve_request='{"feature_id":"revolved-collar","profile":[[20.0,28.0],[22.0,28.0],[22.0,32.0],[20.0,32.0]],"axis_point":[10.0,0.0,0.0],"axis_direction":[0.0,-1.0,0.0],"angle":1.5707963267948966}'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open palette for canceled revolve'
+    wtype revolve || die input_injection_failed 'could not type revolve for cancel'
+    wtype -k Return || die input_injection_failed 'could not select revolve for cancel'
+    wtype "$revolve_request" || die input_injection_failed 'could not type revolve request for cancel'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview revolve for cancel'
+    wait_for_output_marker '[dashed-outline] Preview: revolve'
+    wtype -k Escape || die input_injection_failed 'could not cancel revolve preview'
+    wait_for_output_marker '[cancellation-glyph] Cancellation: command draft discarded'
+    [[ "$(jq -r '.transaction_count' "$PROJECT_ROOT/manifest.json")" == "$cancel_before_count" ]] ||
+        die cancellation_mutated_project 'cancelled revolve preview changed the transaction count'
+    [[ "$(jq -r '.revision_hash' "$PROJECT_ROOT/manifest.json")" == "$cancel_before_revision" ]] ||
+        die cancellation_mutated_project 'cancelled revolve preview changed the revision'
+    [[ "$(project_generation_digest "$PROJECT_ROOT")" == "$cancel_before_digest" ]] ||
+        die cancellation_mutated_project 'cancelled revolve preview changed the project generation'
+    [[ ! -f "$PROJECT_ROOT/brep/revolved-collar.brep" ]] ||
+        die cancellation_mutated_project 'cancelled revolve preview created a BREP'
+    ALL_TOOLS_CANCEL_REVISION="$cancel_before_revision"
+    all_tools_model_step revolved-collar revolve revolved-collar \
+        '{"feature_id":"revolved-collar","profile":[[20.0,28.0],[22.0,28.0],[22.0,32.0],[20.0,32.0]],"axis_point":[10.0,0.0,0.0],"axis_direction":[0.0,-1.0,0.0],"angle":1.5707963267948966}'
+    all_tools_model_step hollow-detail-seed extrude hollow-detail-seed \
+        '{"feature_id":"hollow-detail-seed","profile":[[42.0,5.0],[52.0,5.0],[52.0,15.0],[42.0,15.0]],"height":20.0,"mode":"additive"}'
+    all_tools_model_step hollow-detail shell hollow-detail \
+        '{"feature_id":"hollow-detail","base_feature_id":"hollow-detail-seed","thickness":1.5}'
+    all_tools_model_step hollow-detail-open hole hollow-detail-open \
+        '{"feature_id":"hollow-detail-open","base_feature_id":"hollow-detail","position":[47.0,10.0,0.0],"direction":[0.0,0.0,1.0],"diameter":5.0,"hole_kind":"drilled","measure_removed_volume":true}'
+    all_tools_model_step foundation-with-collar boolean-fuse foundation-with-collar \
+        '{"feature_id":"foundation-with-collar","base_feature_id":"bracket-foundation","tool_feature_id":"revolved-collar"}'
+    all_tools_model_step reinforced-foundation boolean-fuse reinforced-foundation \
+        '{"feature_id":"reinforced-foundation","base_feature_id":"foundation-with-collar","tool_feature_id":"hollow-detail-open"}'
+    all_tools_save_step reinforcement-snapshot reinforced-foundation \
+        '{"feature_id":"reinforcement-snapshot","kind":"checkpoint"}'
+    all_tools_model_step mirrored-collar mirror mirrored-collar \
+        '{"feature_id":"mirrored-collar","base_feature_id":"revolved-collar","plane_point":[0.0,0.0,0.0],"plane_normal":[1.0,-1.0,0.0]}'
+    all_tools_model_step foundation-with-mirrored-collar boolean-fuse foundation-with-mirrored-collar \
+        '{"feature_id":"foundation-with-mirrored-collar","base_feature_id":"reinforced-foundation","tool_feature_id":"mirrored-collar"}'
+    all_tools_model_step linear-pad-seed extrude linear-pad-seed \
+        '{"feature_id":"linear-pad-seed","profile":[[4.0,40.0],[12.0,40.0],[12.0,48.0],[4.0,48.0]],"height":12.0,"mode":"additive"}'
+    all_tools_model_step linear-pads linear-pattern linear-pads \
+        '{"feature_id":"linear-pads","base_feature_id":"linear-pad-seed","direction":[0.0,1.0,0.0],"count":2,"spacing":12.0}'
+    all_tools_model_step foundation-with-linear-pads boolean-fuse foundation-with-linear-pads \
+        '{"feature_id":"foundation-with-linear-pads","base_feature_id":"foundation-with-mirrored-collar","tool_feature_id":"linear-pads"}'
+    all_tools_model_step circular-lug-seed extrude circular-lug-seed \
+        '{"feature_id":"circular-lug-seed","profile":[[43.0,16.0],[47.0,16.0],[47.0,20.0],[43.0,20.0]],"height":12.0,"mode":"additive"}'
+    all_tools_model_step circular-lugs circular-pattern circular-lugs \
+        '{"feature_id":"circular-lugs","base_feature_id":"circular-lug-seed","axis_point":[47.0,10.0,0.0],"axis_normal":[0.0,0.0,1.0],"angle_step":2.0943951023931953,"count":3}'
+    all_tools_model_step foundation-with-circular-lugs boolean-fuse foundation-with-circular-lugs \
+        '{"feature_id":"foundation-with-circular-lugs","base_feature_id":"foundation-with-linear-pads","tool_feature_id":"circular-lugs"}'
+    all_tools_model_step taper-seed extrude taper-seed \
+        '{"feature_id":"taper-seed","profile":[[24.0,0.0],[34.0,0.0],[34.0,4.0],[24.0,4.0]],"height":12.0,"mode":"additive"}'
+    all_tools_model_step tapered-reinforcement draft tapered-reinforcement \
+        '{"feature_id":"tapered-reinforcement","base_feature_id":"taper-seed","angle":0.05235987755982989,"pull_direction":[0.0,0.0,1.0]}'
+    all_tools_model_step foundation-with-taper boolean-fuse foundation-with-taper \
+        '{"feature_id":"foundation-with-taper","base_feature_id":"foundation-with-circular-lugs","tool_feature_id":"tapered-reinforcement"}'
+    all_tools_model_step lofted-gusset loft lofted-gusset \
+        '{"feature_id":"lofted-gusset","profiles":[[[8.0,8.0,8.0],[16.0,8.0,8.0],[16.0,16.0,8.0],[8.0,16.0,8.0]],[[10.0,10.0,18.0],[14.0,10.0,18.0],[14.0,14.0,18.0],[10.0,14.0,18.0]]],"is_solid":true,"ruled":false}'
+    all_tools_model_step complete-bracket boolean-fuse complete-bracket \
+        '{"feature_id":"complete-bracket","base_feature_id":"foundation-with-taper","tool_feature_id":"lofted-gusset"}'
+    all_tools_save_step complete-recipe-snapshot complete-bracket \
+        '{"feature_id":"complete-recipe-snapshot","kind":"checkpoint"}'
+    EXPECTED_FEATURE_ID='complete-bracket'
+    viewport_workflow_evidence="$viewport_evidence"
+    workflow_status='passed'
+    wtype -k Down || die input_injection_failed 'could not select complete-bracket'
+    wait_for_output_marker 'selected feature complete-bracket'
+    capture_screenshot "$SELECTION_SCREENSHOT" || die selection_screenshot_failed 'selection screenshot was not captured'
+    local selection_ocr
+    selection_ocr="$(tesseract "$SELECTION_SCREENSHOT" stdout 2>/dev/null || true)"
+    grep -Fq 'selected feature complete-bracket' <<<"$selection_ocr" || die selection_marker_not_visible 'selection acknowledgement was not visible'
+    grep -Fq 'Viewport presented' <<<"$selection_ocr" || die selection_viewport_marker_not_visible 'viewport evidence was not visible in selection screenshot'
+    extract_viewport_evidence || die selection_viewport_evidence_missing 'selection had no viewport evidence'
+    viewport_selection_evidence="$viewport_evidence"
+    navigation_status='passed'
+    local before_acks before_markers
+    before_acks="$(grep -aFc ';OK' "$PTY_INPUT" 2>/dev/null || true)"
+    before_markers="$(grep -aFc '[motion-trail] Orbit right' "$PTY_OUTPUT" 2>/dev/null || true)"
+    wtype o || die input_injection_failed 'could not orbit the viewport'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" orbit_ready || die orbit_not_observed 'all-tools orbit was not observed'
+    capture_screenshot "$ORBIT_SCREENSHOT" || die orbit_screenshot_failed 'orbit screenshot was not captured'
+    orbit_status='passed'
+    capture_lifecycle_screenshot "$SAVE_SCREENSHOT" 'Save completed' save || true
+    LIFECYCLE_REVISION="$(jq -r '.frame.revision' <<<"$viewport_evidence")"
+    lifecycle_status='passed'
+    wtype q || die input_injection_failed 'could not close the all-tools session'
+    wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die first_tui_exit_failed 'all-tools session did not close cleanly'
+    wait_for_relaunched_tui || die relaunch_not_ready 'all-tools relaunch did not reach readiness'
+    capture_lifecycle_screenshot "$REOPEN_SCREENSHOT" 'Interactive Modeling ready' reopen
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open load palette'
+    wtype load || die input_injection_failed 'could not type load'
+    wtype -k Return || die input_injection_failed 'could not select load'
+    wtype '{}' || die input_injection_failed 'could not type load request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview load'
+    wait_for_output_marker '[dashed-outline] Preview: load'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'could not commit load'
+    wait_for_output_marker 'Load completed'
+    local validate_request='{"feature_id":"complete-bracket"}'
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open validate palette'
+    wtype validate || die input_injection_failed 'could not type validate'
+    wtype -k Return || die input_injection_failed 'could not select validate'
+    wtype "$validate_request" || die input_injection_failed 'could not type validate request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview validate'
+    wait_for_output_marker '[dashed-outline] Preview: validate'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'could not commit validate'
+    wait_for_output_marker '[validation-status] Validation passed'
+    capture_lifecycle_screenshot "$VALIDATION_SCREENSHOT" 'Validation passed' validation
+    validation_status='passed'
+    local export_request
+    export_request="$(jq -n --arg output_dir "$(dirname "$STL_PATH")" '{feature_id:"complete-bracket",formats:["stl"],output_dir:$output_dir,tessellation_deflection:0.02,override_warnings:false,accept_stale_geometry:false}')"
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open export palette'
+    wtype export || die input_injection_failed 'could not type export'
+    wtype -k Return || die input_injection_failed 'could not select export'
+    wtype "$export_request" || die input_injection_failed 'could not type export request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview export'
+    wait_for_output_marker '[dashed-outline] Preview: export'
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'could not commit export'
+    wait_for_output_marker '[export-status] Export completed'
+    capture_lifecycle_screenshot "$EXPORT_SCREENSHOT" 'Export completed' export
+    [[ -f "$STL_PATH" ]] || die export_missing 'UI export did not create the STL'
+    "$(dirname "$TUI_BINARY")/threeterm-stl-integrity" --json "$STL_PATH" >"$STL_INTEGRITY_EVIDENCE" ||
+        die stl_integrity_preflight_failed 'shared STL oracle rejected the UI export'
+    export_status='passed'
+}
+
 read_tui_status() {
     local status_file="${1:-$TUI_STATUS_FILE}"
     [[ -s "$status_file" ]] || return 1
@@ -2065,6 +2383,25 @@ write_manifest() {
             evidence_kinds+=(bracket_step_screenshot)
         done
     fi
+    if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+        evidence_files+=(
+            "$ALL_TOOLS_TRANSCRIPT" "$SAVE_SCREENSHOT" "$REOPEN_SCREENSHOT"
+            "$VALIDATION_SCREENSHOT" "$EXPORT_SCREENSHOT" "$SELECTION_SCREENSHOT"
+            "$ORBIT_SCREENSHOT" "$STL_INTEGRITY_EVIDENCE" "$STL_PATH"
+            "$TUI_STATUS_FILE" "$SECOND_TUI_STATUS_FILE"
+        )
+        evidence_kinds+=(
+            all_tools_transcript save_screenshot reopen_screenshot
+            validation_screenshot export_screenshot selection_screenshot
+            orbit_screenshot stl_integrity exported_stl first_tui_status second_tui_status
+        )
+        local all_tools_step_path
+        for all_tools_step_path in "$ALL_TOOLS_STEPS_DIR"/*.png; do
+            [[ -f "$all_tools_step_path" ]] || continue
+            evidence_files+=("$all_tools_step_path")
+            evidence_kinds+=(all_tools_step_screenshot)
+        done
+    fi
     if command -v jq >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
         local index
         for index in "${!evidence_files[@]}"; do
@@ -2142,9 +2479,11 @@ write_manifest() {
                --arg workflow_transcript "$WORKFLOW_TRANSCRIPT" \
                --arg bracket_transcript "$BRACKET_TRANSCRIPT" \
                --arg bracket_steps_dir "$BRACKET_STEPS_DIR" \
+               --arg all_tools_transcript "$ALL_TOOLS_TRANSCRIPT" \
+               --arg all_tools_steps_dir "$ALL_TOOLS_STEPS_DIR" \
                --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end)' \
+              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir}} else {} end)' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -2211,11 +2550,13 @@ elif [[ "$TEST_ID" == 'production_tui_keyboard_navigation' ]]; then
 elif [[ "$TEST_ID" == 'production_tui_bracket_foundation' ]]; then
     run_bracket_foundation
     run_orbit
+elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+    run_all_tools_journey
 else
     run_orbit
 fi
 wtype q || die input_injection_failed 'compositor keyboard input could not send q'
-if [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' ]]; then
+if [[ "$TEST_ID" == 'production_tui_save_reopen_validate_export' || "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
     wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status "$SECOND_TUI_STATUS_FILE" || die tui_exit_timeout 'reopened production TUI did not exit cleanly after q'
 else
     wait_until "$RUNNER_TIMEOUT_SECONDS" read_tui_status || die tui_exit_timeout 'production TUI did not exit cleanly after q'

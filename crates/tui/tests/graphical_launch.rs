@@ -1813,3 +1813,280 @@ fn production_tui_bracket_foundation() {
     fs::remove_dir_all(root).expect("graphical bracket project removes");
     fs::remove_dir_all(evidence).expect("graphical bracket evidence removes");
 }
+
+const COMPLETE_RECIPE: &str = include_str!("../../host/tests/data/bracket_complete_recipe.v1.json");
+
+#[test]
+fn tui_palette_advertises_every_registered_command() {
+    let palette = threeterm_tui::CommandPalette::new();
+    let registered: Vec<_> = schema::iter().collect();
+    assert_eq!(palette.entries().len(), registered.len());
+    for command in registered {
+        let entry = palette
+            .entries()
+            .iter()
+            .find(|entry| entry.id == command.id)
+            .unwrap_or_else(|| panic!("palette omits registered command {}", command.id.0));
+        assert_eq!(entry.name, command.name);
+        assert_eq!(entry.schema_version, command.schema_version);
+    }
+    for required in [
+        "list",
+        "new-project",
+        "extrude",
+        "boolean-fuse",
+        "fillet",
+        "chamfer",
+        "hole",
+        "revolve",
+        "mirror",
+        "linear-pattern",
+        "circular-pattern",
+        "shell",
+        "draft",
+        "loft",
+        "save",
+        "load",
+        "validate",
+        "export",
+    ] {
+        assert!(
+            palette.entries().iter().any(|entry| entry.name == required),
+            "palette omits required journey command {required}"
+        );
+    }
+}
+
+#[test]
+fn all_tools_recipe_is_frozen_with_thirty_three_transactions() {
+    let recipe: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    assert_eq!(
+        recipe["schema_version"],
+        "threeterm.recipe.bracket-complete/1"
+    );
+    let steps = recipe["steps"].as_array().expect("recipe has steps");
+    assert_eq!(steps.len(), 33);
+    assert_eq!(recipe["expectations"]["transaction_count"], 33);
+    let expected: Vec<(&str, &str)> = vec![
+        ("extrude", "arm-x"),
+        ("extrude", "arm-z"),
+        ("extrude", "pad-a-seed"),
+        ("fillet", "pad-a"),
+        ("extrude", "pad-b-seed"),
+        ("chamfer", "pad-b"),
+        ("boolean-fuse", "bracket-l"),
+        ("boolean-fuse", "bracket-lp1"),
+        ("boolean-fuse", "bracket-base"),
+        ("hole", "bracket-hole-1"),
+        ("hole", "bracket-foundation"),
+        ("save", "foundation-snapshot"),
+        ("revolve", "revolved-collar"),
+        ("extrude", "hollow-detail-seed"),
+        ("shell", "hollow-detail"),
+        ("hole", "hollow-detail-open"),
+        ("boolean-fuse", "foundation-with-collar"),
+        ("boolean-fuse", "reinforced-foundation"),
+        ("save", "reinforcement-snapshot"),
+        ("mirror", "mirrored-collar"),
+        ("boolean-fuse", "foundation-with-mirrored-collar"),
+        ("extrude", "linear-pad-seed"),
+        ("linear-pattern", "linear-pads"),
+        ("boolean-fuse", "foundation-with-linear-pads"),
+        ("extrude", "circular-lug-seed"),
+        ("circular-pattern", "circular-lugs"),
+        ("boolean-fuse", "foundation-with-circular-lugs"),
+        ("extrude", "taper-seed"),
+        ("draft", "tapered-reinforcement"),
+        ("boolean-fuse", "foundation-with-taper"),
+        ("loft", "lofted-gusset"),
+        ("boolean-fuse", "complete-bracket"),
+        ("save", "complete-recipe-snapshot"),
+    ];
+    for (index, (command, feature)) in expected.iter().enumerate() {
+        assert_eq!(steps[index]["command"], *command, "step {}", index + 1);
+        assert_eq!(steps[index]["feature_id"], *feature, "step {}", index + 1);
+    }
+}
+
+#[test]
+#[ignore = "requires the qualified graphical Ghostty and OCCT toolchain"]
+fn production_tui_all_tools_stl_journey() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let workspace = std::env::temp_dir().join(format!(
+        "threeterm-graphical-all-tools-{}-{suffix}",
+        std::process::id()
+    ));
+    let root = workspace.join("project");
+    let evidence = workspace.join("evidence");
+    let export_stl = workspace.join("tui-export/complete-bracket.stl");
+    assert!(
+        !root.exists() && !export_stl.exists(),
+        "journey starts with no project or export fixture"
+    );
+    fs::create_dir_all(&workspace).expect("all-tools workspace creates");
+    OcctWorker::locate().expect("all-tools journey requires the OCCT worker");
+
+    let runner =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.github/scripts/graphical-tui.sh");
+    let output = Command::new("bash")
+        .arg(runner)
+        .arg("production_tui_all_tools_stl_journey")
+        .arg("--tui-binary")
+        .arg(env!("CARGO_BIN_EXE_threeterm-tui"))
+        .arg("--project-root")
+        .arg(&root)
+        .arg("--evidence-root")
+        .arg(&evidence)
+        .output()
+        .expect("all-tools graphical runner starts");
+    assert!(
+        output.status.success(),
+        "all-tools runner failed: stdout={} stderr={} evidence={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        evidence.display()
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(evidence.join("manifest.json")).expect("all-tools manifest exists"),
+    )
+    .expect("all-tools manifest is JSON");
+    assert_eq!(
+        manifest["schema_version"],
+        "threeterm.graphical-tui.all-tools-stl-journey/1"
+    );
+    assert_eq!(manifest["result"], "passed");
+    assert_eq!(manifest["test"], "production_tui_all_tools_stl_journey");
+    for event in [
+        "workflow",
+        "navigation",
+        "orbit",
+        "lifecycle",
+        "validation",
+        "export",
+        "cleanup",
+    ] {
+        assert_eq!(
+            manifest["events"][event], "passed",
+            "event {event} did not pass"
+        );
+    }
+    assert_eq!(
+        manifest["viewport"]["workflow"]["scene"]["solids"][0]["feature_id"],
+        "complete-bracket"
+    );
+
+    let transcript = fs::read_to_string(evidence.join("all-tools-transcript.jsonl"))
+        .expect("all-tools transcript exists");
+    let stages: Vec<Value> = transcript
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("transcript line is JSON"))
+        .collect();
+    assert_eq!(
+        stages.len(),
+        33,
+        "frozen recipe has one transcript entry per step"
+    );
+    let recipe: Value = serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe parses");
+    let recipe_steps = recipe["steps"]
+        .as_array()
+        .expect("recipe steps are an array");
+    for (stage, step) in stages.iter().zip(recipe_steps) {
+        assert_eq!(stage["command"], step["command"]);
+        assert_eq!(stage["feature_id"], step["feature_id"]);
+        assert_eq!(stage["revision"], stage["commit_revision"]);
+        assert_eq!(
+            stage["revision"], stage["viewport_evidence"]["frame"]["revision"],
+            "commit revision matches viewport revision for {}",
+            step["feature_id"]
+        );
+        assert!(
+            stage["viewport_evidence"]["frame"]["image_id"]
+                .as_u64()
+                .is_some_and(|id| id > 0)
+        );
+        assert!(
+            stage["screenshot"]["path"]
+                .as_str()
+                .is_some_and(|path| Path::new(path).is_file())
+        );
+    }
+    for required in [
+        "extrude",
+        "boolean-fuse",
+        "fillet",
+        "chamfer",
+        "hole",
+        "revolve",
+        "mirror",
+        "linear-pattern",
+        "circular-pattern",
+        "shell",
+        "draft",
+        "loft",
+        "save",
+    ] {
+        assert!(
+            stages.iter().any(|stage| stage["command"] == *required),
+            "transcript omits required command {required}"
+        );
+    }
+
+    let bundle = Bundle::at(&root)
+        .open_read_only()
+        .expect("finished bracket opens read-only");
+    assert_eq!(bundle.log.len(), 33);
+    let feature_ids: Vec<_> = bundle
+        .log
+        .entries()
+        .iter()
+        .map(|entry| entry.feature_id.as_str())
+        .collect();
+    let expected_ids: Vec<_> = recipe_steps
+        .iter()
+        .map(|step| step["feature_id"].as_str().expect("feature id"))
+        .collect();
+    assert_eq!(feature_ids, expected_ids);
+
+    let report = stl_integrity::verify_path(&export_stl)
+        .expect("all-tools STL passes the shared independent oracle");
+    let mesh = stl_integrity::observe_path(&export_stl).expect("STL observations parse");
+    assert!(report.triangle_count > 0);
+    assert_eq!(
+        report.shell_count.saturating_sub(report.cavity_shell_count),
+        1,
+        "one material shell, report={report:?}"
+    );
+    assert!(
+        (16000.0..=24000.0).contains(&report.material_volume),
+        "material volume {} outside frozen band",
+        report.material_volume
+    );
+    for (actual, expected) in mesh.bounds_min.into_iter().zip([0.0, 0.0, 0.0]) {
+        assert!((actual - expected).abs() <= 0.05, "bounds_min mismatch");
+    }
+    for (actual, expected) in mesh.bounds_max.into_iter().zip([60.0, 60.0, 20.0]) {
+        assert!((actual - expected).abs() <= 0.05, "bounds_max mismatch");
+    }
+    assert!(
+        manifest["artifacts"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item["kind"] == "all_tools_transcript")
+                && items.iter().any(|item| item["kind"] == "exported_stl")
+                && items.iter().any(|item| item["kind"] == "stl_integrity")
+                && items
+                    .iter()
+                    .filter(|item| item["kind"] == "all_tools_step_screenshot")
+                    .count()
+                    >= 33
+        }),
+        "retained viewport evidence is incomplete"
+    );
+
+    fs::remove_dir_all(workspace).expect("all-tools workspace removes");
+}

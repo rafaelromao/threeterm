@@ -2079,6 +2079,16 @@ fn production_tui_all_tools_stl_journey() {
                 .any(|item| item["kind"] == "all_tools_transcript")
                 && items.iter().any(|item| item["kind"] == "exported_stl")
                 && items.iter().any(|item| item["kind"] == "stl_integrity")
+                && items.iter().any(|item| item["kind"] == "save_screenshot")
+                && items.iter().any(|item| item["kind"] == "reopen_screenshot")
+                && items
+                    .iter()
+                    .any(|item| item["kind"] == "validation_screenshot")
+                && items.iter().any(|item| item["kind"] == "export_screenshot")
+                && items
+                    .iter()
+                    .any(|item| item["kind"] == "selection_screenshot")
+                && items.iter().any(|item| item["kind"] == "orbit_screenshot")
                 && items
                     .iter()
                     .filter(|item| item["kind"] == "all_tools_step_screenshot")
@@ -2086,6 +2096,28 @@ fn production_tui_all_tools_stl_journey() {
                     >= 33
         }),
         "retained viewport evidence is incomplete"
+    );
+
+    let wrong_part = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/export/l-bracket.stl");
+    let wrong_report =
+        stl_integrity::verify_path(&wrong_part).expect("wrong-part control is a valid closed mesh");
+    let wrong_mesh =
+        stl_integrity::observe_path(&wrong_part).expect("wrong-part observations parse");
+    let envelope_matches = wrong_mesh
+        .bounds_min
+        .into_iter()
+        .zip([0.0, 0.0, 0.0])
+        .all(|(actual, expected)| (actual - expected).abs() <= 0.05)
+        && wrong_mesh
+            .bounds_max
+            .into_iter()
+            .zip([60.0, 60.0, 20.0])
+            .all(|(actual, expected)| (actual - expected).abs() <= 0.05)
+        && (16000.0..=24000.0).contains(&wrong_report.material_volume);
+    assert!(
+        !envelope_matches,
+        "shared oracle must reject the wrong part at the envelope landmark"
     );
 
     fs::remove_dir_all(workspace).expect("all-tools workspace removes");

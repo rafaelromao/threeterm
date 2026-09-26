@@ -16,6 +16,8 @@ for expected in \
     'production_tui_reinforcement' \
     'production_tui_mirror_pattern_reinforcing_features' \
     'production_tui_tapered_lofted_reinforcements' \
+    'production_tui_bracket_foundation' \
+    'production_tui_all_tools_stl_journey' \
     '--tui-binary' \
     '--project-root' \
     '--evidence-root' \
@@ -89,6 +91,12 @@ jq -e '
     .result == "not_run" and
     .test == "production_tui_mirror_pattern_reinforcing_features"
 ' <<<"${reinforcing_plan}" >/dev/null
+all_tools_plan="$(bash "${RUNNER}" production_tui_all_tools_stl_journey --print-plan)"
+jq -e '
+    .schema_version == "threeterm.graphical-tui.all-tools-stl-journey/1" and
+    .result == "not_run" and
+    .test == "production_tui_all_tools_stl_journey"
+' <<<"${all_tools_plan}" >/dev/null
 
 for required in \
     'LC_ALL=C.UTF-8' \
@@ -109,6 +117,7 @@ for required in \
     'threeterm.graphical-tui.reinforcement/1' \
     'threeterm.graphical-tui.mirror-pattern-reinforcing-features/1' \
     'threeterm.graphical-tui.tapered-lofted-reinforcements/1' \
+    'threeterm.graphical-tui.all-tools-stl-journey/1' \
     'empty-startup.png' \
     'project-created.png' \
     'extrusion-committed.png' \
@@ -160,6 +169,12 @@ for required in \
     'reinforcement-transcript.jsonl' \
     'expected_revision' \
     'bundle_path' \
+    'all-tools-discovery.json' \
+    'discovery.png' \
+    'Commit: list' \
+    'Preview: list' \
+    'discovery_status' \
+    'all_tools_discovery' \
     '1.3.1-arch2' \
     'THREETERM_PALETTE=catppuccin' \
     'threeterm.viewport-evidence/1' \

@@ -4909,6 +4909,59 @@ impl Host {
         command: CommandId,
         request: serde_json::Value,
     ) -> Result<DomainCommandPreview, ExecutionError<HostError>> {
+        if command == LIST_COMMAND_ID {
+            let mut stripped = request.clone();
+            if let Some(object) = stripped.as_object_mut() {
+                object.remove("bundle_path");
+                object.remove("expected_revision");
+            }
+            if let Err(error) = validate_request(command, &stripped) {
+                return Err(match error {
+                    ExecutionError::UnknownCommand(command) => {
+                        ExecutionError::UnknownCommand(command)
+                    }
+                    ExecutionError::InvalidRequest(detail) => {
+                        ExecutionError::InvalidRequest(detail)
+                    }
+                    ExecutionError::Handler(()) | ExecutionError::InvalidResponse(_) => {
+                        unreachable!()
+                    }
+                });
+            }
+            let source_revision = request
+                .get("bundle_path")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|bundle_path| {
+                    Bundle::at(bundle_path)
+                        .open()
+                        .ok()
+                        .map(|loaded| loaded.revision_hash_hex().to_string())
+                })
+                .unwrap_or_else(|| "discovery".to_string());
+            let registry_value = serde_json::to_value(iter().collect::<Vec<_>>())
+                .expect("command registry serializes for discovery preview");
+            let input_fingerprint = sha256_hex(
+                serde_json::to_string(&stripped)
+                    .expect("list preview request serializes")
+                    .as_bytes(),
+            );
+            let geometry_fingerprint = sha256_hex(
+                serde_json::to_string(&registry_value)
+                    .expect("list registry serializes")
+                    .as_bytes(),
+            );
+            return Ok(DomainCommandPreview {
+                command,
+                preview_revision: sha256_hex(
+                    format!("preview:{source_revision}:{input_fingerprint}:{geometry_fingerprint}")
+                        .as_bytes(),
+                ),
+                source_revision,
+                input_fingerprint,
+                geometry_fingerprint,
+                preview_solid: None,
+            });
+        }
         if let Err(error) = validate_request(command, &request) {
             return Err(match error {
                 ExecutionError::UnknownCommand(command) => ExecutionError::UnknownCommand(command),

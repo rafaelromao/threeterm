@@ -169,6 +169,12 @@ for required in \
     'reinforcement-transcript.jsonl' \
     'expected_revision' \
     'bundle_path' \
+    'all-tools-discovery.json' \
+    'discovery.png' \
+    'Commit: list' \
+    'Preview: list' \
+    'discovery_status' \
+    'all_tools_discovery' \
     '1.3.1-arch2' \
     'THREETERM_PALETTE=catppuccin' \
     'threeterm.viewport-evidence/1' \

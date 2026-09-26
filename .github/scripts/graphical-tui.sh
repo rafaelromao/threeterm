@@ -60,6 +60,8 @@ BRACKET_TRANSCRIPT=''
 BRACKET_STEPS_DIR=''
 ALL_TOOLS_TRANSCRIPT=''
 ALL_TOOLS_STEPS_DIR=''
+ALL_TOOLS_DISCOVERY=''
+DISCOVERY_SCREENSHOT=''
 ALL_TOOLS_CANCEL_REVISION=''
 PROJECT_CREATED_SCREENSHOT=''
 EXTRUSION_COMMITTED_SCREENSHOT=''
@@ -102,6 +104,7 @@ probe_status='not_run'
 readiness_status='not_run'
 orbit_status='not_run'
 navigation_status='not_run'
+discovery_status='not_run'
 workflow_status='not_run'
 lifecycle_status='not_run'
 validation_status='not_run'
@@ -562,6 +565,8 @@ fi
 if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
     ALL_TOOLS_TRANSCRIPT="${EVIDENCE_ROOT}/all-tools-transcript.jsonl"
     ALL_TOOLS_STEPS_DIR="${EVIDENCE_ROOT}/all-tools-steps"
+    ALL_TOOLS_DISCOVERY="${EVIDENCE_ROOT}/all-tools-discovery.json"
+    DISCOVERY_SCREENSHOT="${EVIDENCE_ROOT}/discovery.png"
     SAVE_SCREENSHOT="${EVIDENCE_ROOT}/save.png"
     REOPEN_SCREENSHOT="${EVIDENCE_ROOT}/reopen.png"
     VALIDATION_SCREENSHOT="${EVIDENCE_ROOT}/validation.png"
@@ -2088,6 +2093,65 @@ run_all_tools_journey() {
     wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'could not commit new-project'
     wait_for_output_marker 'Project created:'
     [[ -f "$PROJECT_ROOT/manifest.json" ]] || die project_not_created 'new-project commit did not create a manifest'
+    local discovery_before_count discovery_before_revision
+    local discovery_before_preview discovery_before_commit
+    local discovery_preview_response discovery_commit_response
+    local discovery_input_start discovery_input_end discovery_input_sha
+    local discovery_screenshot_sha discovery_ocr
+    local -a discovery_marker_lines
+    discovery_before_count="$(jq -r '.transaction_count' "$PROJECT_ROOT/manifest.json")"
+    discovery_before_revision="$(jq -r '.revision_hash' "$PROJECT_ROOT/manifest.json")"
+    discovery_before_preview="$(grep -aFc "[dashed-outline] Preview: list" "$PTY_OUTPUT" 2>/dev/null || true)"
+    discovery_before_commit="$(grep -aFc "[selection-glyph] Commit: list" "$PTY_OUTPUT" 2>/dev/null || true)"
+    discovery_input_start="$(wc -c <"$PTY_INPUT" | tr -d '[:space:]')"
+    wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open palette for list'
+    wtype list || die input_injection_failed 'could not type list'
+    wtype -k Return || die input_injection_failed 'could not select list'
+    wtype '{}' || die input_injection_failed 'could not type list request'
+    wtype -M ctrl -k v -m ctrl || die input_injection_failed 'could not preview list'
+    wait_for_output_marker_count "[dashed-outline] Preview: list" "$((discovery_before_preview + 1))"
+    mapfile -t discovery_marker_lines < <(
+        tr '\r' '\n' <"$PTY_OUTPUT" | grep -aF "[dashed-outline] Preview: list" || true
+    )
+    discovery_preview_response="${discovery_marker_lines[${#discovery_marker_lines[@]}-1]}"
+    wtype -M ctrl -k Return -m ctrl || die input_injection_failed 'could not commit list'
+    wait_for_output_marker_count "[selection-glyph] Commit: list" "$((discovery_before_commit + 1))"
+    mapfile -t discovery_marker_lines < <(
+        tr '\r' '\n' <"$PTY_OUTPUT" | grep -aF "[selection-glyph] Commit: list" || true
+    )
+    discovery_commit_response="${discovery_marker_lines[${#discovery_marker_lines[@]}-1]}"
+    [[ "$(jq -r '.transaction_count' "$PROJECT_ROOT/manifest.json")" == "$discovery_before_count" ]] ||
+        die discovery_mutated_project 'list commit changed the transaction count'
+    [[ "$(jq -r '.revision_hash' "$PROJECT_ROOT/manifest.json")" == "$discovery_before_revision" ]] ||
+        die discovery_mutated_project 'list commit changed the revision'
+    for discovery_required in list new-project extrude boolean-fuse fillet chamfer hole revolve mirror linear-pattern circular-pattern shell draft loft save load validate export; do
+        grep -Fq "$discovery_required" <<<"$discovery_commit_response" ||
+            die discovery_inventory_incomplete "list acknowledgement omits ${discovery_required}"
+    done
+    capture_screenshot "$DISCOVERY_SCREENSHOT" || die discovery_screenshot_failed 'discovery screenshot was not retained'
+    discovery_ocr="$(tesseract "$DISCOVERY_SCREENSHOT" stdout 2>/dev/null || true)"
+    grep -Fq "Commit: list" <<<"$discovery_ocr" || die discovery_marker_not_visible 'list commit marker was not visible'
+    grep -Fq "Viewport presented" <<<"$discovery_ocr" || die discovery_viewport_marker_not_visible 'viewport marker was not visible for discovery'
+    discovery_input_end="$(wc -c <"$PTY_INPUT" | tr -d '[:space:]')"
+    ((discovery_input_end > discovery_input_start)) ||
+        die discovery_keyboard_input_missing 'no scoped keyboard input was recorded for list'
+    discovery_input_sha="$(sha256sum "$PTY_INPUT" | cut -d' ' -f1)"
+    discovery_screenshot_sha="$(sha256sum "$DISCOVERY_SCREENSHOT" | cut -d' ' -f1)"
+    jq -n \
+        --arg schema_version "$SCHEMA_VERSION" \
+        --arg command "list" \
+        --arg preview_response "$discovery_preview_response" \
+        --arg commit_response "$discovery_commit_response" \
+        --arg revision "$discovery_before_revision" \
+        --arg pty_log "$PTY_INPUT" \
+        --argjson input_start_offset "$discovery_input_start" \
+        --argjson input_end_offset "$discovery_input_end" \
+        --arg input_sha256 "$discovery_input_sha" \
+        --arg screenshot "$DISCOVERY_SCREENSHOT" \
+        --arg screenshot_sha256 "$discovery_screenshot_sha" \
+        '{schema_version:$schema_version,command:$command,acknowledgement:{preview:$preview_response,commit:$commit_response},revision:$revision,keyboard_input:{pty_log:$pty_log,start_offset:$input_start_offset,end_offset:$input_end_offset,log_sha256:$input_sha256},screenshot:{path:$screenshot,sha256:$screenshot_sha256}}' \
+        >"$ALL_TOOLS_DISCOVERY" || die discovery_evidence_unavailable 'list discovery evidence could not be retained'
+    discovery_status='passed'
     BRACKET_TRANSCRIPT="$saved_bracket_transcript"
     BRACKET_STEPS_DIR="$saved_bracket_steps"
     all_tools_model_step arm-x extrude arm-x \
@@ -2385,13 +2449,15 @@ write_manifest() {
     fi
     if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
         evidence_files+=(
-            "$ALL_TOOLS_TRANSCRIPT" "$SAVE_SCREENSHOT" "$REOPEN_SCREENSHOT"
+            "$ALL_TOOLS_TRANSCRIPT" "$ALL_TOOLS_DISCOVERY" "$DISCOVERY_SCREENSHOT"
+            "$SAVE_SCREENSHOT" "$REOPEN_SCREENSHOT"
             "$VALIDATION_SCREENSHOT" "$EXPORT_SCREENSHOT" "$SELECTION_SCREENSHOT"
             "$ORBIT_SCREENSHOT" "$STL_INTEGRITY_EVIDENCE" "$STL_PATH"
             "$TUI_STATUS_FILE" "$SECOND_TUI_STATUS_FILE"
         )
         evidence_kinds+=(
-            all_tools_transcript save_screenshot reopen_screenshot
+            all_tools_transcript all_tools_discovery discovery_screenshot
+            save_screenshot reopen_screenshot
             validation_screenshot export_screenshot selection_screenshot
             orbit_screenshot stl_integrity exported_stl first_tui_status second_tui_status
         )
@@ -2472,6 +2538,7 @@ write_manifest() {
                --arg navigation_before "$navigation_project_generation_digest_before" \
               --arg navigation_after "$navigation_project_generation_digest_after" \
               --arg navigation_status "$navigation_status" \
+              --arg discovery_status "$discovery_status" \
               --arg workflow_status "$workflow_status" \
                --arg lifecycle_status "$lifecycle_status" \
               --arg validation_status "$validation_status" \
@@ -2481,9 +2548,11 @@ write_manifest() {
                --arg bracket_steps_dir "$BRACKET_STEPS_DIR" \
                --arg all_tools_transcript "$ALL_TOOLS_TRANSCRIPT" \
                --arg all_tools_steps_dir "$ALL_TOOLS_STEPS_DIR" \
+               --arg all_tools_discovery "$ALL_TOOLS_DISCOVERY" \
+               --arg discovery_screenshot "$DISCOVERY_SCREENSHOT" \
                --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir}} else {} end)' \
+              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,discovery:$discovery_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir,discovery:$all_tools_discovery,discovery_screenshot:$discovery_screenshot}} else {} end)' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest

@@ -1962,6 +1962,7 @@ fn production_tui_all_tools_stl_journey() {
     assert_eq!(manifest["result"], "passed");
     assert_eq!(manifest["test"], "production_tui_all_tools_stl_journey");
     for event in [
+        "discovery",
         "workflow",
         "navigation",
         "orbit",
@@ -1975,6 +1976,83 @@ fn production_tui_all_tools_stl_journey() {
             "event {event} did not pass"
         );
     }
+    let discovery: Value = serde_json::from_slice(
+        &fs::read(evidence.join("all-tools-discovery.json")).expect("all-tools discovery exists"),
+    )
+    .expect("all-tools discovery is JSON");
+    assert_eq!(discovery["command"], "list");
+    let discovery_preview = discovery["acknowledgement"]["preview"]
+        .as_str()
+        .expect("discovery has a preview acknowledgement");
+    assert!(
+        discovery_preview.contains("[dashed-outline] Preview: list"),
+        "discovery preview was not observed through the palette: {discovery_preview}"
+    );
+    let discovery_commit = discovery["acknowledgement"]["commit"]
+        .as_str()
+        .expect("discovery has a commit acknowledgement");
+    assert!(
+        discovery_commit.contains("[selection-glyph] Commit: list"),
+        "discovery commit was not observed through the palette: {discovery_commit}"
+    );
+    let discovery_revision = discovery["revision"]
+        .as_str()
+        .expect("discovery has a revision");
+    assert!(
+        discovery_revision.len() == 64 && discovery_revision.chars().all(|c| c.is_ascii_hexdigit()),
+        "discovery revision is not a revision hash: {discovery_revision}"
+    );
+    let discovery_ids = discovery_commit
+        .rsplit_once("ids=")
+        .map(|(_, ids)| ids.to_string())
+        .unwrap_or_default();
+    let registered: Vec<_> = schema::iter().collect();
+    assert!(!registered.is_empty(), "registered command table is empty");
+    for command in &registered {
+        assert!(
+            discovery_ids.contains(command.name),
+            "real-UI list inventory omits registered command {}",
+            command.name
+        );
+    }
+    for required in [
+        "list",
+        "new-project",
+        "extrude",
+        "boolean-fuse",
+        "fillet",
+        "chamfer",
+        "hole",
+        "revolve",
+        "mirror",
+        "linear-pattern",
+        "circular-pattern",
+        "shell",
+        "draft",
+        "loft",
+        "save",
+        "load",
+        "validate",
+        "export",
+    ] {
+        assert!(
+            discovery_ids.contains(required),
+            "real-UI list inventory omits required journey command {required}"
+        );
+    }
+    assert!(
+        discovery["screenshot"]["path"]
+            .as_str()
+            .is_some_and(|path| Path::new(path).is_file()),
+        "discovery screenshot was not retained"
+    );
+    assert!(
+        discovery["keyboard_input"]["start_offset"]
+            .as_u64()
+            .zip(discovery["keyboard_input"]["end_offset"].as_u64())
+            .is_some_and(|(start, end)| end > start),
+        "discovery has no scoped keyboard input"
+    );
     assert_eq!(
         manifest["viewport"]["workflow"]["scene"]["solids"][0]["feature_id"],
         "complete-bracket"
@@ -2077,6 +2155,12 @@ fn production_tui_all_tools_stl_journey() {
             items
                 .iter()
                 .any(|item| item["kind"] == "all_tools_transcript")
+                && items
+                    .iter()
+                    .any(|item| item["kind"] == "all_tools_discovery")
+                && items
+                    .iter()
+                    .any(|item| item["kind"] == "discovery_screenshot")
                 && items.iter().any(|item| item["kind"] == "exported_stl")
                 && items.iter().any(|item| item["kind"] == "stl_integrity")
                 && items.iter().any(|item| item["kind"] == "save_screenshot")

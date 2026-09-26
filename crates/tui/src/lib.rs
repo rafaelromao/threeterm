@@ -18,7 +18,7 @@ use threeterm_host::{
 };
 use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::schema::{
-    CommandId, EXPORT_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
+    CommandId, EXPORT_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
     REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SAVE_COMMAND_ID,
     SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID, VALIDATE_COMMAND_ID,
 };
@@ -4361,6 +4361,50 @@ impl<R: Renderer> TuiViewportSession<R> {
                 "validation did not establish a valid current solid".to_string(),
             );
         }
+        if command == LIST_COMMAND_ID {
+            let commands = response.as_array().cloned().unwrap_or_default();
+            let revision = self.tui.state().canonical_revision.clone();
+            self.tui
+                .transition_command(CommandEvent::CommitAccepted {
+                    source_revision: source_revision.clone(),
+                    validated_revision: source_revision.clone(),
+                    revision: revision.clone(),
+                })
+                .map_err(TuiViewportError::Tui)?;
+            self.draft.cancel();
+            let ids = commands
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .get("name")
+                        .or_else(|| entry.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let overlay = format!(
+                "[selection-glyph] Commit: list revision={revision} commands={} ids={ids}",
+                commands.len(),
+            );
+            self.record_action(
+                "committed",
+                command.0,
+                source_revision,
+                revision.clone(),
+                preview_revision,
+                geometry_fingerprint,
+                false,
+                None,
+            );
+            return Ok(KeyboardInputOutcome {
+                rendered: None,
+                submission: None,
+                overlay,
+                response: Some(response),
+                active_project_root,
+            });
+        }
         let revision = if let Some(project_root) = active_project_root.as_ref() {
             match host.load_with_geometry_replay(project_root) {
                 Ok(snapshot) => snapshot.revision_hash,
@@ -4538,7 +4582,7 @@ impl<R: Renderer> TuiViewportSession<R> {
         let object = request
             .as_object_mut()
             .ok_or_else(|| "draft input must be a JSON object".to_string())?;
-        if draft.command != NEW_PROJECT_COMMAND_ID {
+        if draft.command != NEW_PROJECT_COMMAND_ID && draft.command != LIST_COMMAND_ID {
             object.insert(
                 "bundle_path".to_string(),
                 Value::String(root.to_string_lossy().into_owned()),

@@ -233,7 +233,8 @@ run_gate workflow.l-bracket \
 THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1
 THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-cli --test l_bracket_draft_e2e l_bracket_draft_commits_through_the_cli --jobs 1 -- --include-ignored --exact --test-threads=1
 THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test mcp_bracket tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation --jobs 1 -- --include-ignored --exact --test-threads=1
-THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-host --test bracket_base_qualification e2e_stl_api_all_tools_l_bracket --jobs 1 -- --include-ignored --exact --test-threads=1' \
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-host --test bracket_base_qualification e2e_stl_api_all_tools_l_bracket --jobs 1 -- --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test production_lifecycle e2e_stl_mcp_all_tools_l_bracket --jobs 1 -- --include-ignored --exact --test-threads=1' \
     bash -e -u -o pipefail -c '
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test l_bracket_workflow l_bracket_adapter_parity \
@@ -252,6 +253,10 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-host --test bracket_base_qualification \
             e2e_stl_api_all_tools_l_bracket \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-mcp --test production_lifecycle \
+            e2e_stl_mcp_all_tools_l_bracket \
             --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 

@@ -8,19 +8,25 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_host::bracket_oracle::{
+    assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents, mesh_number,
+    recipe_steps, selected_edge_from_recipe,
+};
 use threeterm_host::stl_integrity::{self, StlFormat};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
 use threeterm_protocol::schema::{
-    BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID,
-    NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID, VALIDATE_COMMAND_ID, find, iter,
+    BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
+    LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID, VALIDATE_COMMAND_ID, find,
+    find_by_name, iter,
 };
 use threeterm_protocol::schema_validator::validate;
 
 const PINNED_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const NEW_PROJECT_TOOL: &str = "threeterm.command.new-project/1";
 const EXTRUDE_TOOL: &str = "threeterm.command.extrude/2";
+const COMPLETE_RECIPE: &str = include_str!("../../host/tests/data/bracket_complete_recipe.v1.json");
 
 type StreamLine = Result<Vec<u8>, String>;
 
@@ -302,7 +308,10 @@ fn threeterm_mcp_binary() -> PathBuf {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_threeterm_mcp") {
         return PathBuf::from(path);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/threeterm-mcp")
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    target.join("debug/threeterm-mcp")
 }
 
 fn fresh_root() -> PathBuf {
@@ -350,6 +359,33 @@ fn structured_tool_success(response: &Value, id: &str) -> Value {
         "MCP text and structured content differ"
     );
     structured
+}
+
+fn assert_correlated_structured_ok(protocol: &[&Value], call_id: &str, command_name: &str) {
+    let response = protocol
+        .iter()
+        .find(|value| value["id"] == call_id && value.get("result").is_some())
+        .unwrap_or_else(|| {
+            panic!("journey evidence lacks a result for {command_name} call {call_id}")
+        });
+    let result = &response["result"];
+    assert_eq!(
+        result["isError"], false,
+        "journey evidence reports failure for {command_name} call {call_id}: {response}"
+    );
+    let structured = result["structuredContent"].clone();
+    assert!(
+        structured.is_object(),
+        "journey evidence lacks structuredContent for {command_name} call {call_id}: {response}"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap_or_else(|| {
+        panic!("journey evidence lacks text for {command_name} call {call_id}: {response}")
+    });
+    assert_eq!(
+        serde_json::from_str::<Value>(text).expect("journey evidence text is JSON"),
+        structured,
+        "journey evidence text and structured content differ for {command_name} call {call_id}"
+    );
 }
 
 fn advertised_tools(client: &mut McpProcess) -> Vec<Value> {
@@ -985,4 +1021,426 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
     }
     drop(_cleanup);
     assert!(!root.exists(), "lifecycle root remains after cleanup");
+}
+
+#[test]
+#[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
+fn e2e_stl_mcp_all_tools_l_bracket() {
+    require_native_worker("e2e_stl_mcp_all_tools_l_bracket");
+
+    let recipe: Value =
+        serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
+    assert_eq!(
+        recipe_steps(&recipe).len(),
+        33,
+        "complete recipe has 33 steps"
+    );
+
+    let root = fresh_root();
+    let _cleanup = CleanupRoot(root.clone());
+    let project = root.join("project");
+    let export_root = root.join("export");
+    assert!(
+        !project.exists(),
+        "journey starts with no server-side project"
+    );
+    assert!(
+        !export_root.exists(),
+        "journey starts with no export fixture"
+    );
+
+    let mut journey_evidence: Vec<(String, String)> = Vec::new();
+    let mut client = McpProcess::spawn();
+    let initialized = client.request(
+        "initialize",
+        "initialize",
+        json!({
+            "protocolVersion": PINNED_MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "threeterm-mcp-e2e-journey", "version": "1.0.0"}
+        }),
+    );
+    let initialize_result = assert_protocol_success(&initialized, "initialize");
+    assert_eq!(
+        initialize_result["protocolVersion"],
+        PINNED_MCP_PROTOCOL_VERSION
+    );
+    client.notify("notifications/initialized", json!({}));
+
+    let tools = advertised_tools(&mut client);
+    let tool_names = tools
+        .iter()
+        .map(|tool| {
+            tool["name"]
+                .as_str()
+                .expect("advertised tool name is a string")
+        })
+        .collect::<HashSet<_>>();
+    let mut required_tools = vec![
+        find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .schema_version,
+        find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .schema_version,
+    ];
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("step has a command");
+        let registered = find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe references unknown command {command_name}"));
+        if !required_tools.contains(&registered.schema_version) {
+            required_tools.push(registered.schema_version);
+        }
+    }
+    for command_id in [LOAD_COMMAND_ID, VALIDATE_COMMAND_ID, EXPORT_COMMAND_ID] {
+        required_tools.push(
+            find(command_id)
+                .expect("lifecycle command is registered")
+                .schema_version,
+        );
+    }
+    for tool in &required_tools {
+        assert!(
+            tool_names.contains(tool),
+            "MCP discovery omits journey tool {tool}"
+        );
+    }
+
+    let created = client.call_tool(
+        "create",
+        find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .schema_version,
+        json!({"destination": project.to_string_lossy()}),
+    );
+    let created = structured_tool_success(&created, "create");
+    validate(
+        &find(NEW_PROJECT_COMMAND_ID)
+            .expect("new-project is registered")
+            .response_schema,
+        &created,
+    )
+    .expect("MCP new-project response validates");
+    journey_evidence.push(("new-project".to_string(), "create".to_string()));
+    let generation_id = created["generation_id"]
+        .as_str()
+        .expect("new-project returns a generation ID")
+        .to_string();
+    let initial_revision = assert_fresh_project(&project, &generation_id);
+
+    let identity = client.call_tool(
+        "identity",
+        find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let identity = structured_tool_success(&identity, "identity");
+    validate(
+        &find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .response_schema,
+        &identity,
+    )
+    .expect("MCP identity response validates");
+    journey_evidence.push(("identity".to_string(), "identity".to_string()));
+    assert_eq!(identity["transaction_count"], 0, "journey starts empty");
+    assert_eq!(
+        identity["revision_hash"], initial_revision,
+        "identity seeds the initial revision"
+    );
+
+    let empty = Bundle::at(&project).open().expect("journey project opens");
+    assert!(empty.log.is_empty(), "journey starts with an empty log");
+    assert!(
+        empty.graph.features().next().is_none(),
+        "journey starts with no features"
+    );
+    assert!(!export_root.exists(), "export destination starts absent");
+
+    let mut revision = initial_revision;
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("journey step command");
+        let feature_id = step["feature_id"].as_str().expect("journey feature ID");
+        let step_index = step["index"].as_u64().expect("journey step index");
+        let registered = find_by_name(command_name)
+            .unwrap_or_else(|| panic!("recipe references unknown command {command_name}"));
+        let mut request = step["request"].clone();
+        request["bundle_path"] = project.to_string_lossy().into_owned().into();
+        if matches!(
+            command_name,
+            "extrude"
+                | "revolve"
+                | "fillet"
+                | "chamfer"
+                | "hole"
+                | "shell"
+                | "mirror"
+                | "linear-pattern"
+                | "circular-pattern"
+                | "draft"
+                | "loft"
+                | "save"
+        ) {
+            request["expected_revision"] = revision.clone().into();
+        }
+        if matches!(command_name, "fillet" | "chamfer") {
+            request["selected_edge"] = selected_edge_from_recipe(
+                request["base_feature_id"]
+                    .as_str()
+                    .expect("finishing request has a base feature ID"),
+                &revision,
+                &step["edge_selection"],
+            );
+        }
+
+        let call_id = format!("step-{step_index}");
+        let response = client.call_tool(&call_id, registered.schema_version, request);
+        let response = structured_tool_success(&response, &call_id);
+        validate(&registered.response_schema, &response).unwrap_or_else(|error| {
+            panic!("step {feature_id} response violates its schema: {error}")
+        });
+        let next_revision = response["revision_hash"]
+            .as_str()
+            .expect("journey response has a revision hash")
+            .to_string();
+        assert_ne!(
+            next_revision, revision,
+            "step {feature_id} advances revision"
+        );
+        if command_name != "save" {
+            assert_eq!(response["status"], "ok", "step {feature_id} succeeds");
+            assert_eq!(response["operation"], command_name);
+            assert_eq!(response["feature_id"], feature_id);
+        }
+        journey_evidence.push((command_name.to_string(), call_id));
+        revision = next_revision;
+    }
+
+    let expected_feature_ids: Vec<_> = recipe_steps(&recipe)
+        .iter()
+        .map(|step| step["feature_id"].as_str().expect("journey feature ID"))
+        .collect();
+    let saved = Bundle::at(&project)
+        .open()
+        .expect("journey bundle opens after the recipe");
+    assert_eq!(
+        saved.log.len(),
+        recipe_steps(&recipe).len(),
+        "journey retains every recipe transaction"
+    );
+    assert_eq!(
+        saved
+            .log
+            .entries()
+            .iter()
+            .map(|entry| entry.feature_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_feature_ids,
+        "journey log feature ids match the recipe order"
+    );
+    assert_eq!(
+        saved.manifest.transaction_count, recipe["expectations"]["transaction_count"],
+        "journey manifest counts every recipe transaction"
+    );
+    assert_reinforcement_intents(&recipe, &saved);
+    assert!(
+        saved.log.entries()[19..32]
+            .iter()
+            .all(|entry| entry.intent.is_some()),
+        "complete geometry steps retain canonical intents"
+    );
+    assert!(saved.log.entries()[32].intent.is_none());
+    assert_complete_intents(&recipe, &saved);
+    assert_eq!(
+        saved.graph.features().count(),
+        recipe_steps(&recipe).len(),
+        "journey feature graph retains every recipe feature"
+    );
+    let finished_revision = revision.clone();
+    let finished_graph_hash = saved.feature_graph_hash_hex().to_string();
+    let finished_transaction_count = saved.manifest.transaction_count;
+
+    let first_evidence = client.finish();
+    assert!(first_evidence.server_diagnostics.is_empty());
+    assert!(first_evidence.protocol_errors.is_empty());
+    assert!(first_evidence.domain_errors.is_empty());
+
+    let mut restarted = McpProcess::spawn();
+    let reinitialized = restarted.request(
+        "restart-initialize",
+        "initialize",
+        json!({
+            "protocolVersion": PINNED_MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "threeterm-mcp-e2e-journey", "version": "1.0.0"}
+        }),
+    );
+    let reinitialize_result = assert_protocol_success(&reinitialized, "restart-initialize");
+    assert_eq!(
+        reinitialize_result["protocolVersion"],
+        PINNED_MCP_PROTOCOL_VERSION
+    );
+    restarted.notify("notifications/initialized", json!({}));
+
+    let loaded = restarted.call_tool(
+        "load",
+        find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let loaded = structured_tool_success(&loaded, "load");
+    validate(
+        &find(LOAD_COMMAND_ID)
+            .expect("load is registered")
+            .response_schema,
+        &loaded,
+    )
+    .expect("MCP load response validates");
+    journey_evidence.push(("load".to_string(), "load".to_string()));
+    assert_eq!(loaded["revision_hash"], finished_revision);
+    assert_eq!(loaded["feature_graph_hash"], finished_graph_hash);
+
+    let reloaded_identity = restarted.call_tool(
+        "identity",
+        find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .schema_version,
+        json!({"bundle_path": project.to_string_lossy()}),
+    );
+    let reloaded_identity = structured_tool_success(&reloaded_identity, "identity");
+    validate(
+        &find(IDENTITY_COMMAND_ID)
+            .expect("identity is registered")
+            .response_schema,
+        &reloaded_identity,
+    )
+    .expect("MCP reloaded identity response validates");
+    journey_evidence.push(("identity".to_string(), "identity".to_string()));
+    assert_eq!(
+        reloaded_identity["transaction_count"], finished_transaction_count,
+        "reloaded identity reports every recipe transaction"
+    );
+    assert_eq!(
+        reloaded_identity["transaction_count"],
+        recipe["expectations"]["transaction_count"]
+    );
+    assert_eq!(reloaded_identity["revision_hash"], finished_revision);
+    assert_eq!(reloaded_identity["feature_graph_hash"], finished_graph_hash);
+    assert_eq!(loaded["revision_hash"], reloaded_identity["revision_hash"]);
+    assert_eq!(
+        loaded["feature_graph_hash"],
+        reloaded_identity["feature_graph_hash"]
+    );
+
+    let validated = restarted.call_tool(
+        "validate",
+        find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "complete-bracket",
+        }),
+    );
+    let validated = structured_tool_success(&validated, "validate");
+    validate(
+        &find(VALIDATE_COMMAND_ID)
+            .expect("validate is registered")
+            .response_schema,
+        &validated,
+    )
+    .expect("MCP validate response validates");
+    journey_evidence.push(("validate".to_string(), "validate".to_string()));
+    assert_eq!(validated["status"], "ok", "MCP validate succeeds");
+    assert_eq!(
+        validated["valid"], true,
+        "MCP validate accepts complete-bracket"
+    );
+    assert_eq!(validated["feature_id"], "complete-bracket");
+    assert_eq!(validated["revision_hash"], finished_revision);
+    assert_eq!(validated["feature_graph_hash"], finished_graph_hash);
+
+    assert!(
+        !export_root.exists(),
+        "export destination stays absent before export"
+    );
+    let exported = restarted.call_tool(
+        "export",
+        find(EXPORT_COMMAND_ID)
+            .expect("export is registered")
+            .schema_version,
+        json!({
+            "bundle_path": project.to_string_lossy(),
+            "feature_id": "complete-bracket",
+            "formats": ["stl"],
+            "output_dir": export_root.to_string_lossy(),
+            "tessellation_deflection": mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
+            "override_warnings": false,
+            "accept_stale_geometry": false,
+        }),
+    );
+    let exported = structured_tool_success(&exported, "export");
+    validate(
+        &find(EXPORT_COMMAND_ID)
+            .expect("export is registered")
+            .response_schema,
+        &exported,
+    )
+    .expect("MCP export response validates");
+    journey_evidence.push(("export".to_string(), "export".to_string()));
+    assert_eq!(exported["status"], "ok", "MCP export succeeds");
+    assert_eq!(exported["feature_id"], "complete-bracket");
+    assert_eq!(exported["source_revision_id"], finished_revision);
+
+    let stl_path = export_root.join("complete-bracket.stl");
+    assert!(stl_path.is_file(), "journey STL exists after MCP export");
+    assert_eq!(
+        exported["artifacts"],
+        json!([stl_path.to_string_lossy()]),
+        "MCP export reports the journey STL artifact"
+    );
+
+    let report = stl_integrity::verify_path(&stl_path)
+        .expect("journey STL passes independent integrity verification");
+    let mesh = stl_integrity::observe_path(&stl_path).expect("journey STL observations parse");
+    assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
+        panic!(
+            "journey bracket mesh failed landmark {}: {failure}",
+            failure.landmark
+        )
+    });
+
+    let second_evidence = restarted.finish();
+    assert!(second_evidence.server_diagnostics.is_empty());
+    assert!(second_evidence.protocol_errors.is_empty());
+    assert!(second_evidence.domain_errors.is_empty());
+
+    let mut required_commands = vec!["new-project".to_string(), "identity".to_string()];
+    for step in recipe_steps(&recipe) {
+        let command_name = step["command"].as_str().expect("journey step command");
+        if !required_commands.iter().any(|name| name == command_name) {
+            required_commands.push(command_name.to_string());
+        }
+    }
+    for command_id in [LOAD_COMMAND_ID, VALIDATE_COMMAND_ID, EXPORT_COMMAND_ID] {
+        let registered = find(command_id).expect("lifecycle command is registered");
+        if !required_commands.iter().any(|name| name == registered.name) {
+            required_commands.push(registered.name.to_string());
+        }
+    }
+
+    let chained_protocol: Vec<&Value> = first_evidence
+        .protocol
+        .iter()
+        .chain(second_evidence.protocol.iter())
+        .collect();
+    for command_name in &required_commands {
+        let (_, call_id) = journey_evidence
+            .iter()
+            .find(|(recorded, _)| recorded == command_name)
+            .unwrap_or_else(|| panic!("journey evidence omits required command {command_name}"));
+        assert_correlated_structured_ok(&chained_protocol, call_id, command_name);
+    }
 }

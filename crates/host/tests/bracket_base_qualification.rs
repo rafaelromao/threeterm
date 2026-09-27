@@ -1993,10 +1993,10 @@ fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str) {
 }
 
 fn journey_evidence_root() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
-        .join("api-journey-coverage")
+    let root = evidence_root();
+    configured_run_id()
+        .map(|run_id| root.join(run_id).join("api"))
+        .unwrap_or_else(|| root.join("api-journey-coverage"))
 }
 
 fn write_journey_evidence(path: &Path, evidence: &Value) {

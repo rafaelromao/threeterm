@@ -315,23 +315,20 @@ pub fn compare_signatures(
                 ),
             ));
         }
-        let mut left_intersections = left_sample.intersections.clone();
-        let mut right_intersections = right_sample.intersections.clone();
-        left_intersections.sort_by(f64::total_cmp);
-        right_intersections.sort_by(f64::total_cmp);
-        if left_intersections.len() != right_intersections.len()
-            || left_intersections
-                .iter()
-                .zip(&right_intersections)
-                .any(|(left, right)| (left - right).abs() > tolerances.linear_mm)
-        {
+        if !intersections_match(
+            &left_sample.intersections,
+            &right_sample.intersections,
+            tolerances.linear_mm,
+        ) {
             return Err(failure(
                 left_name,
                 right_name,
                 MismatchKind::SurfaceSamples,
                 format!(
                     "sample {} differs: {:?} vs {:?}",
-                    left_sample.name, left_intersections, right_intersections
+                    left_sample.name,
+                    sorted_intersections(&left_sample.intersections),
+                    sorted_intersections(&right_sample.intersections)
                 ),
             ));
         }
@@ -351,17 +348,13 @@ fn compare_probes(
         return Err(failure(left_name, right_name, kind, "probe counts differ"));
     }
     for (left_probe, right_probe) in left.iter().zip(right) {
-        let mut left_intersections = left_probe.intersections.clone();
-        let mut right_intersections = right_probe.intersections.clone();
-        left_intersections.sort_by(f64::total_cmp);
-        right_intersections.sort_by(f64::total_cmp);
         if left_probe.name != right_probe.name
             || left_probe.occupied != right_probe.occupied
-            || left_intersections.len() != right_intersections.len()
-            || left_intersections
-                .iter()
-                .zip(&right_intersections)
-                .any(|(left, right)| (left - right).abs() > tolerance)
+            || !intersections_match(
+                &left_probe.intersections,
+                &right_probe.intersections,
+                tolerance,
+            )
         {
             return Err(failure(
                 left_name,
@@ -372,6 +365,22 @@ fn compare_probes(
         }
     }
     Ok(())
+}
+
+fn intersections_match(left: &[f64], right: &[f64], tolerance: f64) -> bool {
+    let left = sorted_intersections(left);
+    let right = sorted_intersections(right);
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| (left - right).abs() <= tolerance)
+}
+
+fn sorted_intersections(intersections: &[f64]) -> Vec<f64> {
+    let mut sorted = intersections.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted
 }
 
 fn failure(
@@ -837,6 +846,9 @@ fn provenance_matches(report: &JourneyEvidenceReport) -> bool {
 }
 
 fn stable_provenance(report: &JourneyEvidenceReport) -> Value {
+    // Each producer has an independent Project Generation, so its Revision
+    // Snapshot hash is validated against its own manifest but is not a
+    // cross-surface identity key.
     let manifest = &report.workers["project_manifest"];
     json!({
         "schemas": {

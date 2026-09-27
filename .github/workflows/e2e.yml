@@ -106,7 +106,7 @@ jobs:
               "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
               "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
               "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
-              "replay.reattach-edge", "registry.command-schemas",
+              "replay.reattach-edge", "reliability.failure-drill", "registry.command-schemas",
               "schema.identities", "licensing.libslvs", "release.namespace",
               "documentation.workspace", "performance.claims"]) and
             (if $expected_result == "passed" then
@@ -134,5 +134,6 @@ jobs:
             target/acceptance-run/native-worker-manifest.json
             target/acceptance-run/occt-geometry-smoke/real-occt-geometry-smoke.json
             target/acceptance-run/api-journey-coverage/api-journey-coverage.json
+            target/acceptance-run/reliability-failure-drill
             target/acceptance-run/libslvs-artifact
           if-no-files-found: error

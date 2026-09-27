@@ -65,6 +65,10 @@ bash .github/scripts/test-suite.sh slow
 # `target/acceptance-catalog.json`; an unavailable worker or unsigned release
 # gate is recorded as failed and returns a non-zero status.
 bash .github/scripts/acceptance.sh
+
+# Check the three-journey producer/aggregate shell contract without native
+# workers or a graphical runner.
+bash tests/three-journey-gate.sh
 ```
 
 ## Official Interactive Environment Verification
@@ -144,6 +148,32 @@ all journey and aggregate reports are stored under the run ID within the
 configured evidence root;
 raw STL bytes, facet order, generated identities, timestamps, paths, and
 transaction IDs are not equivalence keys.
+
+### Three-journey CI gate
+
+Pull-request CI runs `.github/workflows/three-journey.yml`. The API and MCP
+journeys run in the pinned rootless Arch container, while the TUI journey runs
+only on a self-hosted runner labelled `threeterm-graphical` with
+`THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT` configured. The jobs share the run ID,
+recipe binding, native-worker bundle, and retained evidence before the aggregate
+job writes `target/three-journey-gate/catalog.json`.
+
+Run the same orchestration locally when the native workers and qualified
+graphical environment are available:
+
+```sh
+THREETERM_JOURNEY_RUN_ID="$(git rev-parse HEAD)-$(date +%s)" \
+  bash .github/scripts/three-journey-gate.sh
+```
+
+Each producer retains stdout, stderr, attempt metadata, journey reports,
+coverage reports, native-worker identities, and geometric comparison output
+under `target/three-journey-gate`. The timeout defaults to 900 seconds per
+journey and can be adjusted with
+`THREETERM_THREE_JOURNEY_TIMEOUT_SECONDS`; process-group cleanup grace is
+controlled by `THREETERM_THREE_JOURNEY_KILL_GRACE_SECONDS`. Missing jobs are
+recorded as `unrun` and prerequisite failures as `prerequisite_skipped`; neither
+can produce a passing catalog.
 
 ## Compatibility contract
 

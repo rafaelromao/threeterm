@@ -1,0 +1,248 @@
+name: three-journey-gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  THREETERM_JOURNEY_RUN_ID: ${{ github.sha }}-${{ github.run_id }}
+  THREETERM_THREE_JOURNEY_ROOT: ${{ github.workspace }}/target/three-journey-gate
+
+jobs:
+  headless:
+    name: API and MCP journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman uidmap fuse-overlayfs slirp4netns
+          podman --version
+
+      - name: Verify rootless Podman
+        run: |
+          set -euo pipefail
+          podman info --format '{{.Host.Security.Rootless}}' | grep -qi '^true$'
+
+      - name: Run headless producers with immutable native workers
+        run: |
+          set -uo pipefail
+          mkdir -p "${HOME}/.cargo"
+          set +e
+          podman run --rm \
+            --security-opt label=disable \
+            -v "${PWD}:/workspace" \
+            -v "${HOME}/.cargo:/root/.cargo" \
+            -w /workspace \
+            -e "THREETERM_JOURNEY_RUN_ID=${THREETERM_JOURNEY_RUN_ID}" \
+            -e "THREETERM_THREE_JOURNEY_ROOT=/workspace/target/three-journey-gate" \
+            -e THREETERM_THREE_JOURNEY_RESET=true \
+            docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
+            bash -lc '
+              set -euo pipefail
+              channel="$(tr -d "[:space:]" < rust-toolchain-channel.txt)"
+              pacman -Syu --noconfirm --needed base-devel cmake git curl jq freetype2 fontconfig libx11 rustup tar
+              rustup toolchain install "${channel}" --profile minimal --component rustfmt --component clippy
+              rustup default "${channel}" >/dev/null
+              export THREETERM_THREE_JOURNEY_ROOT=/workspace/target/three-journey-gate
+              export CARGO_TARGET_DIR="${THREETERM_THREE_JOURNEY_ROOT}/target"
+              export THREETERM_JOURNEY_RUN_ID="${THREETERM_JOURNEY_RUN_ID}"
+              api_status=0
+              bash .github/scripts/three-journey-gate.sh --surface api || api_status=$?
+              unset THREETERM_THREE_JOURNEY_RESET
+              mcp_status=0
+              bash .github/scripts/three-journey-gate.sh --surface mcp || mcp_status=$?
+
+              mkdir -p "${THREETERM_THREE_JOURNEY_ROOT}/worker-bundle"
+              source .github/scripts/native-workers.sh
+              if occt="$(selected_worker_path occt 2>/dev/null)" \
+                && slvs="$(selected_worker_path slvs 2>/dev/null)" \
+                && [[ -d "$(native_worker_root)/libslvs-artifact" ]] \
+                && [[ -f "$(native_worker_root)/native-worker-manifest.json" ]]; then
+                cp "${occt}" "${THREETERM_THREE_JOURNEY_ROOT}/worker-bundle/occt-worker"
+                cp "${slvs}" "${THREETERM_THREE_JOURNEY_ROOT}/worker-bundle/slvs-worker"
+                cp -a "$(native_worker_root)/prefixes" "${THREETERM_THREE_JOURNEY_ROOT}/worker-bundle/"
+                cp -a "$(native_worker_root)/libslvs-artifact" "${THREETERM_THREE_JOURNEY_ROOT}/worker-bundle/"
+                cp "$(native_worker_root)/native-worker-manifest.json" \
+                  "${THREETERM_THREE_JOURNEY_ROOT}/worker-bundle/"
+              fi
+              tar --exclude="three-journey-gate/target" -czf \
+                /workspace/target/three-journey-headless.tar -C /workspace/target three-journey-gate
+              ((api_status == 0 && mcp_status == 0))
+            '
+          headless_status=$?
+          set -e
+          exit "${headless_status}"
+
+      - name: Upload headless evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: three-journey-headless
+          path: target/three-journey-headless.tar
+          if-no-files-found: error
+
+  tui:
+    name: Qualified graphical TUI journey
+    needs: headless
+    if: ${{ always() }}
+    runs-on: [self-hosted, linux, x64, threeterm-graphical]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download headless worker bundle
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: three-journey-headless
+          path: target
+
+      - name: Run qualified TUI producer
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          if [[ -f target/three-journey-headless.tar ]]; then
+            tar -xzf target/three-journey-headless.tar -C target
+          fi
+          root="${THREETERM_THREE_JOURNEY_ROOT}"
+          status=0
+          if [[ -x "${root}/worker-bundle/occt-worker" && -x "${root}/worker-bundle/slvs-worker" ]]; then
+            export THREETERM_OCCTBUILD_WORKER="${root}/worker-bundle/occt-worker"
+            export THREETERM_SLVSBUILD_WORKER="${root}/worker-bundle/slvs-worker"
+            export THREETERM_OCCT_DIR="${root}/worker-bundle/prefixes/occt"
+            export THREETERM_SLVS_DIR="${root}/worker-bundle/prefixes/slvs"
+            export THREETERM_OCCT_LIB_DIR="${THREETERM_OCCT_DIR}/lib"
+            export THREETERM_SLVS_LIB_DIR="${THREETERM_SLVS_DIR}/lib"
+            export LD_LIBRARY_PATH="${THREETERM_OCCT_LIB_DIR}:${THREETERM_SLVS_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            export THREETERM_OCCT_WORKER_SHA256="$(sha256sum "${THREETERM_OCCTBUILD_WORKER}" | cut -d' ' -f1)"
+            export THREETERM_SLVS_WORKER_SHA256="$(sha256sum "${THREETERM_SLVSBUILD_WORKER}" | cut -d' ' -f1)"
+            export THREETERM_NATIVE_WORKER_MANIFEST="${root}/worker-bundle/native-worker-manifest.json"
+            bash .github/scripts/three-journey-gate.sh --surface tui || status=$?
+          else
+            bash .github/scripts/three-journey-gate.sh --synthesize tui prerequisite_skipped 'headless worker bundle was unavailable' || status=$?
+          fi
+          mkdir -p target
+          tar --exclude="three-journey-gate/target" -czf target/three-journey-tui.tar -C target three-journey-gate
+          exit "${status}"
+
+      - name: Upload TUI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: three-journey-tui
+          path: target/three-journey-tui.tar
+          if-no-files-found: error
+
+  aggregate:
+    name: Aggregate and publish evidence catalog
+    needs: [headless]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Wait for qualified graphical producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          wait_seconds=3900
+          interval_seconds=15
+          elapsed=0
+          tui_status=unrun
+          while ((elapsed < wait_seconds)); do
+            jobs_json='{"jobs":[]}'
+            if jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" 2>/dev/null)"; then
+              tui_status="$(jq -r '[.jobs[] | select(.name == "Qualified graphical TUI journey")][0].status // "queued"' <<<"${jobs_json}")"
+              tui_conclusion="$(jq -r '[.jobs[] | select(.name == "Qualified graphical TUI journey")][0].conclusion // ""' <<<"${jobs_json}")"
+              if [[ "${tui_status}" == completed ]]; then
+                tui_status="completed:${tui_conclusion}"
+                break
+              fi
+            fi
+            sleep "${interval_seconds}"
+            elapsed=$((elapsed + interval_seconds))
+          done
+          printf '%s\n' "${tui_status}" >target/tui-job-status
+
+      - name: Download producer evidence
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: three-journey-*
+          merge-multiple: true
+          path: target
+
+      - name: Aggregate retained evidence
+        run: |
+          set -euo pipefail
+          mkdir -p target
+          for archive in target/three-journey-headless.tar target/three-journey-tui.tar; do
+            if [[ -f "${archive}" ]]; then
+              tar -xzf "${archive}" -C target
+            fi
+          done
+          root="${THREETERM_THREE_JOURNEY_ROOT}"
+          mkdir -p "${root}/attempts"
+          headless_result='${{ needs.headless.result }}'
+          tui_result="$(<target/tui-job-status)"
+          headless_missing_status=unrun
+          [[ "${headless_result}" == success || "${headless_result}" == failure ]] && headless_missing_status=failed
+          tui_missing_status=unrun
+          [[ "${tui_result}" == completed:* ]] && tui_missing_status=failed
+          synthesize_missing() {
+            local surface="$1" missing_status="$2"
+            if [[ ! -f "${root}/attempts/${surface}.json" ]]; then
+              bash .github/scripts/three-journey-gate.sh --synthesize "${surface}" "${missing_status}" \
+                "producer job did not publish an attempt (headless=${headless_result}, tui=${tui_result})" || true
+            fi
+          }
+          synthesize_missing api "${headless_missing_status}"
+          synthesize_missing mcp "${headless_missing_status}"
+          synthesize_missing tui "${tui_missing_status}"
+          aggregate_status=0
+          bash .github/scripts/three-journey-gate.sh --aggregate || aggregate_status=$?
+          test "${aggregate_status}" -eq 0
+
+      - name: Validate passing catalog
+        run: |
+          set -euo pipefail
+          jq -e '
+            .schema_version == "threeterm.acceptance.three-journey/1" and
+            .result == "passed" and
+            (.journeys | length == 3) and
+            (.journeys | all(.status == "passed" and .timed_out == false)) and
+            .coverage.result == "passed" and
+            .geometric_equivalence != null and
+            (.errors | length == 0)
+          ' "${THREETERM_THREE_JOURNEY_ROOT}/catalog.json"
+
+      - name: Upload evidence catalog
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: three-journey-evidence-catalog
+          path: |
+            target/three-journey-gate/catalog.json
+            target/three-journey-gate/run.json
+            target/three-journey-gate/attempts
+            target/three-journey-gate/process
+            target/three-journey-gate/evidence
+            target/three-journey-gate/coverage
+            target/three-journey-gate/worker-bundle
+          if-no-files-found: error

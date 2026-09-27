@@ -69,6 +69,9 @@ fn write_tui_report(
         dirty: manifest["source"]["dirty"].as_bool().unwrap_or(true),
     };
     let result = manifest["result"].as_str().unwrap_or("failed");
+    let test = manifest["test"]
+        .as_str()
+        .ok_or_else(|| "TUI manifest has no retained test name".to_string())?;
     let adapter_exposure = markers
         .iter()
         .find(|marker| marker["command_name"] == "list")
@@ -92,10 +95,7 @@ fn write_tui_report(
     let report = JourneyReport {
         schema_version: JOURNEY_REPORT_SCHEMA_VERSION.to_string(),
         surface: Surface::Tui,
-        test: manifest["test"]
-            .as_str()
-            .unwrap_or("production_tui_all_tools_stl_journey")
-            .to_string(),
+        test: test.to_string(),
         recipe_schema_version: RECIPE_SCHEMA_VERSION.to_string(),
         source,
         result: result.to_string(),

@@ -36,7 +36,12 @@ fn complete_report(surface: Surface) -> JourneyReport {
     JourneyReport {
         schema_version: "threeterm.coverage.journey-report/1".to_string(),
         surface,
-        test: "fixture".to_string(),
+        test: match surface {
+            Surface::Api => "e2e_stl_api_all_tools_l_bracket",
+            Surface::Mcp => "e2e_stl_mcp_all_tools_l_bracket",
+            Surface::Tui => "production_tui_all_tools_stl_journey",
+        }
+        .to_string(),
         recipe_schema_version: "threeterm.recipe.bracket-complete/1".to_string(),
         source: SourceIdentity {
             commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
@@ -147,6 +152,25 @@ fn evaluator_identifies_advertised_inventory_and_schema_drift() {
             .iter()
             .any(|delta| delta.kind == "duplicate-adapter-exposure")
     );
+}
+
+#[test]
+fn evaluator_identifies_a_wrong_journey_test_for_a_surface() {
+    let mut report = complete_report(Surface::Api);
+    report.test = "different-journey".to_string();
+
+    let matrix = evaluate([
+        ReportInput::complete(report),
+        ReportInput::complete(complete_report(Surface::Mcp)),
+        ReportInput::complete(complete_report(Surface::Tui)),
+    ]);
+
+    assert!(matrix.deltas.iter().any(|delta| {
+        delta.kind == "journey-test-mismatch"
+            && delta.surface == Some(Surface::Api)
+            && delta.expected == "e2e_stl_api_all_tools_l_bracket"
+            && delta.actual == "different-journey"
+    }));
 }
 
 #[test]

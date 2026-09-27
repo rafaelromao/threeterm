@@ -44,6 +44,12 @@ const REQUIRED_COMMANDS: &[&str] = &[
     "export",
 ];
 
+const JOURNEY_TEST_NAMES: [(Surface, &str); 3] = [
+    (Surface::Api, "e2e_stl_api_all_tools_l_bracket"),
+    (Surface::Mcp, "e2e_stl_mcp_all_tools_l_bracket"),
+    (Surface::Tui, "production_tui_all_tools_stl_journey"),
+];
+
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Surface {
@@ -223,6 +229,13 @@ pub fn required_commands() -> &'static [&'static str] {
     REQUIRED_COMMANDS
 }
 
+fn expected_journey_test(surface: Surface) -> &'static str {
+    JOURNEY_TEST_NAMES
+        .iter()
+        .find_map(|(candidate, test)| (*candidate == surface).then_some(*test))
+        .expect("every coverage surface has an expected journey test")
+}
+
 pub fn current_registry() -> RegistrySnapshot {
     let rows = schema::iter().map(command_contract).collect();
     RegistrySnapshot {
@@ -400,6 +413,17 @@ pub fn evaluate_with_registry(
                 None,
                 input.surface.as_str(),
                 report.surface.as_str(),
+            );
+        }
+        let expected_test = expected_journey_test(input.surface);
+        if report.test != expected_test {
+            push_delta(
+                &mut deltas,
+                input.surface,
+                "journey-test-mismatch",
+                None,
+                expected_test,
+                &report.test,
             );
         }
         if report.result != "passed" {

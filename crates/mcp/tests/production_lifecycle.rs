@@ -9,8 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::bracket_equivalence::{
-    JourneyMetadata, configured_run_id, current_source_identity, evidence_root, new_journey_report,
-    publish_journey_report,
+    JourneyMetadata, configured_run_id, current_source_identity, evidence_root,
+    new_journey_evidence_report, publish_journey_evidence_report,
 };
 use threeterm_host::bracket_oracle::{
     assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents, mesh_number,
@@ -1472,7 +1472,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
             .chain(second_evidence.domain_errors.iter())
             .cloned()
             .collect();
-        let report = new_journey_report(
+        let report = new_journey_evidence_report(
             run_id,
             "mcp",
             "e2e_stl_mcp_all_tools_l_bracket",
@@ -1509,7 +1509,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
             },
             finished_revision,
         );
-        publish_journey_report(&evidence_root(), report, &stl_path)
+        publish_journey_evidence_report(&evidence_root(), report, &stl_path)
             .expect("MCP journey evidence publishes for equivalence");
     }
 }

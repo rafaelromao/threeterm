@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::bracket_equivalence::{
-    JourneyMetadata, configured_run_id, current_source_identity, evidence_root, new_journey_report,
-    publish_journey_report,
+    JourneyMetadata, configured_run_id, current_source_identity, evidence_root,
+    new_journey_evidence_report, publish_journey_evidence_report,
 };
 use threeterm_host::{Host, stl_integrity};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
@@ -2214,7 +2214,7 @@ fn production_tui_all_tools_stl_journey() {
             .expect("retained journey requires the selected OCCT worker")
             .verify_identity()
             .expect("retained journey records the selected OCCT fingerprint");
-        let report = new_journey_report(
+        let report = new_journey_evidence_report(
             run_id,
             "tui",
             "production_tui_all_tools_stl_journey",
@@ -2246,7 +2246,7 @@ fn production_tui_all_tools_stl_journey() {
             },
             bundle.manifest.revision_hash.clone(),
         );
-        publish_journey_report(&evidence_root(), report, &export_stl)
+        publish_journey_evidence_report(&evidence_root(), report, &export_stl)
             .expect("TUI journey evidence publishes for equivalence");
     }
 

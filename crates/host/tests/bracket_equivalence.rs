@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use threeterm_host::bracket_equivalence::{
     GeometrySignature, JourneyMetadata, MismatchKind, ProbeSample, SourceIdentity, SurfaceSample,
     TolerancePolicy, TopologySignature, compare_signatures, compare_three_reports,
-    configured_run_id, evidence_root, new_journey_report, publish_journey_report,
+    configured_run_id, evidence_root, new_journey_evidence_report, publish_journey_evidence_report,
     write_aggregate_failure, write_aggregate_report,
 };
 
@@ -124,7 +124,7 @@ fn retained_journey_publication_copies_and_hashes_the_artifact() {
         .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/export/l-bracket.stl");
     fs::create_dir_all(&root).expect("report fixture root creates");
     fs::copy(fixture, &source).expect("report fixture copies");
-    let report = new_journey_report(
+    let report = new_journey_evidence_report(
         "run-report-test",
         "api",
         "e2e_stl_api_all_tools_l_bracket",
@@ -141,8 +141,8 @@ fn retained_journey_publication_copies_and_hashes_the_artifact() {
         },
         "revision",
     );
-    let report_path =
-        publish_journey_report(&root, report, &source).expect("report publication succeeds");
+    let report_path = publish_journey_evidence_report(&root, report, &source)
+        .expect("report publication succeeds");
     let retained: serde_json::Value =
         serde_json::from_slice(&fs::read(&report_path).expect("retained report reads"))
             .expect("retained report parses");

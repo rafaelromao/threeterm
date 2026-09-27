@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use threeterm_host::Host;
 use threeterm_host::bracket_equivalence::{
-    JourneyMetadata, configured_run_id, current_source_identity, evidence_root, new_journey_report,
-    publish_journey_report,
+    JourneyMetadata, configured_run_id, current_source_identity, evidence_root,
+    new_journey_evidence_report, publish_journey_evidence_report,
 };
 use threeterm_host::bracket_oracle::{
     assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents, mesh_number,
@@ -2313,7 +2313,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             .expect("retained journey requires the selected OCCT worker")
             .verify_identity()
             .expect("retained journey records the selected OCCT fingerprint");
-        let report = new_journey_report(
+        let report = new_journey_evidence_report(
             run_id,
             "api",
             "e2e_stl_api_all_tools_l_bracket",
@@ -2342,7 +2342,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
                 .as_str()
                 .expect("validated revision is a string"),
         );
-        publish_journey_report(&evidence_root(), report, &stl_path)
+        publish_journey_evidence_report(&evidence_root(), report, &stl_path)
             .expect("API journey evidence publishes for equivalence");
     }
     drop(workspace);

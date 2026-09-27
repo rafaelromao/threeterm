@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use threeterm_protocol::artifact::sha256_hex;
 
-use crate::bracket_oracle::{assert_bracket_mesh, point_inside_mesh};
+use crate::bracket_oracle::{assert_bracket_mesh, cross, dot, point_inside_mesh, subtract};
 use crate::stl_integrity::{StlIntegrityReport, StlMeshObservation, observe_path, verify_path};
 
-pub const JOURNEY_REPORT_SCHEMA_VERSION: &str = "threeterm.evidence.bracket-journey/1";
+pub const JOURNEY_EVIDENCE_REPORT_SCHEMA_VERSION: &str = "threeterm.evidence.bracket-journey/1";
 pub const AGGREGATE_REPORT_SCHEMA_VERSION: &str = "threeterm.evidence.bracket-equivalence/1";
 pub const API_SURFACE: &str = "api";
 pub const MCP_SURFACE: &str = "mcp";
 pub const TUI_SURFACE: &str = "tui";
-pub const JOURNEY_SURFACES: [&str; 3] = [API_SURFACE, MCP_SURFACE, TUI_SURFACE];
+pub const PRODUCER_SURFACES: [&str; 3] = [API_SURFACE, MCP_SURFACE, TUI_SURFACE];
 pub const REQUIRED_JOURNEY_COMMANDS: [&str; 18] = [
     "list",
     "new-project",
@@ -107,10 +107,10 @@ pub struct ArtifactRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct JourneyReport {
+pub struct JourneyEvidenceReport {
     pub schema_version: String,
     pub run_id: String,
-    pub surface: String,
+    pub producer_surface: String,
     pub test: String,
     pub result: String,
     pub recipe: RecipeIdentity,
@@ -132,16 +132,16 @@ pub struct JourneyMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SurfaceSignature {
-    pub surface: String,
+pub struct ProducerSurfaceSignature {
+    pub producer_surface: String,
     pub artifact: ArtifactRecord,
     pub geometry: GeometrySignature,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairComparison {
-    pub left: String,
-    pub right: String,
+    pub left_producer_surface: String,
+    pub right_producer_surface: String,
     pub result: String,
 }
 
@@ -151,7 +151,7 @@ pub struct AggregateReport {
     pub run_id: String,
     pub recipe: RecipeIdentity,
     pub source: SourceIdentity,
-    pub surfaces: Vec<SurfaceSignature>,
+    pub producer_surfaces: Vec<ProducerSurfaceSignature>,
     pub comparisons: Vec<PairComparison>,
 }
 
@@ -159,7 +159,10 @@ pub struct AggregateReport {
 pub enum EquivalenceError {
     Io(String),
     Report(String),
-    IndependentExpectation { surface: String, detail: String },
+    IndependentExpectation {
+        producer_surface: String,
+        detail: String,
+    },
     Comparison(ComparisonFailure),
 }
 
@@ -167,10 +170,13 @@ impl std::fmt::Display for EquivalenceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(detail) | Self::Report(detail) => formatter.write_str(detail),
-            Self::IndependentExpectation { surface, detail } => {
+            Self::IndependentExpectation {
+                producer_surface,
+                detail,
+            } => {
                 write!(
                     formatter,
-                    "{surface} independent expectation failed: {detail}"
+                    "{producer_surface} independent expectation failed: {detail}"
                 )
             }
             Self::Comparison(failure) => failure.fmt(formatter),
@@ -192,8 +198,8 @@ pub enum MismatchKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComparisonFailure {
-    pub left: String,
-    pub right: String,
+    pub left_producer_surface: String,
+    pub right_producer_surface: String,
     pub kind: MismatchKind,
     pub detail: String,
 }
@@ -203,7 +209,7 @@ impl std::fmt::Display for ComparisonFailure {
         write!(
             formatter,
             "{} vs {} {:?}: {}",
-            self.left, self.right, self.kind, self.detail
+            self.left_producer_surface, self.right_producer_surface, self.kind, self.detail
         )
     }
 }
@@ -373,8 +379,8 @@ fn failure(
     detail: impl Into<String>,
 ) -> ComparisonFailure {
     ComparisonFailure {
-        left: left.to_string(),
-        right: right.to_string(),
+        left_producer_surface: left.to_string(),
+        right_producer_surface: right.to_string(),
         kind,
         detail: detail.into(),
     }
@@ -431,18 +437,18 @@ pub fn current_source_identity() -> Result<SourceIdentity, EquivalenceError> {
     Ok(SourceIdentity { commit, dirty })
 }
 
-pub fn new_journey_report(
+pub fn new_journey_evidence_report(
     run_id: impl Into<String>,
     surface: impl Into<String>,
     test: impl Into<String>,
     recipe: &Value,
     metadata: JourneyMetadata,
     revision_snapshot_hash: impl Into<String>,
-) -> JourneyReport {
-    JourneyReport {
-        schema_version: JOURNEY_REPORT_SCHEMA_VERSION.to_string(),
+) -> JourneyEvidenceReport {
+    JourneyEvidenceReport {
+        schema_version: JOURNEY_EVIDENCE_REPORT_SCHEMA_VERSION.to_string(),
         run_id: run_id.into(),
-        surface: surface.into(),
+        producer_surface: surface.into(),
         test: test.into(),
         result: "passed".to_string(),
         recipe: RecipeIdentity {
@@ -468,13 +474,13 @@ pub fn new_journey_report(
     }
 }
 
-pub fn publish_journey_report(
+pub fn publish_journey_evidence_report(
     root: &Path,
-    mut report: JourneyReport,
+    mut report: JourneyEvidenceReport,
     source_stl: &Path,
 ) -> Result<PathBuf, EquivalenceError> {
-    validate_surface(&report.surface)?;
-    if report.schema_version != JOURNEY_REPORT_SCHEMA_VERSION {
+    validate_producer_surface(&report.producer_surface)?;
+    if report.schema_version != JOURNEY_EVIDENCE_REPORT_SCHEMA_VERSION {
         return Err(EquivalenceError::Report(
             "journey report has an unsupported schema".to_string(),
         ));
@@ -490,7 +496,7 @@ pub fn publish_journey_report(
             source_stl.display()
         )));
     }
-    let surface_root = root.join(&report.surface);
+    let surface_root = root.join(&report.producer_surface);
     fs::create_dir_all(&surface_root).map_err(io_error)?;
     let artifact_path = surface_root.join("complete-bracket.stl");
     let artifact_tmp =
@@ -501,11 +507,11 @@ pub fn publish_journey_report(
     let integrity = verify_path(&artifact_path).map_err(|error| {
         EquivalenceError::Report(format!(
             "retained {} STL failed independent verification: {error}",
-            report.surface
+            report.producer_surface
         ))
     })?;
     let bytes = fs::read(&artifact_path).map_err(io_error)?;
-    report.artifact.path = format!("{}/complete-bracket.stl", report.surface);
+    report.artifact.path = format!("{}/complete-bracket.stl", report.producer_surface);
     report.artifact.bytes = bytes.len() as u64;
     report.artifact.sha256 = sha256_hex(&bytes);
     report.artifact.integrity = Some(integrity);
@@ -551,67 +557,67 @@ pub fn compare_three_reports(
         .first()
         .map(|report| report.source.clone())
         .ok_or_else(|| EquivalenceError::Report("no journey reports were loaded".to_string()))?;
-    let mut surfaces = Vec::with_capacity(reports.len());
+    let mut producer_surfaces = Vec::with_capacity(reports.len());
     for report in reports {
         let artifact_path = safe_regular_file(
             root,
             Path::new(&report.artifact.path),
-            &format!("{} retained STL", report.surface),
+            &format!("{} retained STL", report.producer_surface),
         )?;
         let integrity = verify_path(&artifact_path).map_err(|error| {
             EquivalenceError::IndependentExpectation {
-                surface: report.surface.clone(),
+                producer_surface: report.producer_surface.clone(),
                 detail: error.to_string(),
             }
         })?;
         if report.artifact.integrity.as_ref() != Some(&integrity) {
             return Err(EquivalenceError::Report(format!(
                 "{} retained integrity report does not match the STL",
-                report.surface
+                report.producer_surface
             )));
         }
         let mesh = observe_path(&artifact_path).map_err(|error| {
             EquivalenceError::IndependentExpectation {
-                surface: report.surface.clone(),
+                producer_surface: report.producer_surface.clone(),
                 detail: error.to_string(),
             }
         })?;
         assert_bracket_mesh(recipe, &integrity, &mesh).map_err(|failure| {
             EquivalenceError::IndependentExpectation {
-                surface: report.surface.clone(),
+                producer_surface: report.producer_surface.clone(),
                 detail: failure.to_string(),
             }
         })?;
-        let geometry = signature_from_mesh(recipe, &integrity, &mesh, &report.surface)?;
-        surfaces.push(SurfaceSignature {
-            surface: report.surface,
+        let geometry = signature_from_mesh(recipe, &integrity, &mesh, &report.producer_surface)?;
+        producer_surfaces.push(ProducerSurfaceSignature {
+            producer_surface: report.producer_surface,
             artifact: report.artifact,
             geometry,
         });
     }
 
     let tolerances = tolerance_policy(recipe)?;
-    let reference_volume = surfaces
+    let reference_volume = producer_surfaces
         .iter()
-        .find(|surface| surface.surface == API_SURFACE)
+        .find(|surface| surface.producer_surface == API_SURFACE)
         .and_then(|surface| surface.artifact.integrity.as_ref())
         .map(|integrity| integrity.material_volume)
         .ok_or_else(|| EquivalenceError::Report("API reference volume is missing".to_string()))?;
     let mut comparisons = Vec::new();
-    for left in 0..surfaces.len() {
-        for right in (left + 1)..surfaces.len() {
+    for left in 0..producer_surfaces.len() {
+        for right in (left + 1)..producer_surfaces.len() {
             compare_signatures(
-                &surfaces[left].surface,
-                &surfaces[left].geometry,
-                &surfaces[right].surface,
-                &surfaces[right].geometry,
+                &producer_surfaces[left].producer_surface,
+                &producer_surfaces[left].geometry,
+                &producer_surfaces[right].producer_surface,
+                &producer_surfaces[right].geometry,
                 tolerances,
                 reference_volume,
             )
             .map_err(EquivalenceError::Comparison)?;
             comparisons.push(PairComparison {
-                left: surfaces[left].surface.clone(),
-                right: surfaces[right].surface.clone(),
+                left_producer_surface: producer_surfaces[left].producer_surface.clone(),
+                right_producer_surface: producer_surfaces[right].producer_surface.clone(),
                 result: "passed".to_string(),
             });
         }
@@ -629,7 +635,7 @@ pub fn compare_three_reports(
             units: recipe["units"].as_str().unwrap_or("mm").to_string(),
         },
         source,
-        surfaces,
+        producer_surfaces,
         comparisons,
     })
 }
@@ -638,23 +644,23 @@ fn load_reports(
     root: &Path,
     run_id: &str,
     recipe: &Value,
-) -> Result<Vec<JourneyReport>, EquivalenceError> {
+) -> Result<Vec<JourneyEvidenceReport>, EquivalenceError> {
     if run_id.is_empty() {
         return Err(EquivalenceError::Report(
             "journey run ID is required".to_string(),
         ));
     }
     let expected_recipe_digest = recipe_digest(recipe);
-    let mut reports = Vec::with_capacity(JOURNEY_SURFACES.len());
+    let mut reports = Vec::with_capacity(PRODUCER_SURFACES.len());
     let mut source_commit = None;
-    for surface in JOURNEY_SURFACES {
+    for surface in PRODUCER_SURFACES {
         let path = safe_regular_file(
             root,
             Path::new(&format!("{surface}/journey.json")),
             &format!("{surface} journey report"),
         )?;
-        let report: JourneyReport = serde_json::from_slice(&fs::read(&path).map_err(io_error)?)
-            .map_err(|error| {
+        let report: JourneyEvidenceReport =
+            serde_json::from_slice(&fs::read(&path).map_err(io_error)?).map_err(|error| {
                 EquivalenceError::Report(format!("{surface} report is malformed: {error}"))
             })?;
         validate_report(&report, surface, run_id, &expected_recipe_digest)?;
@@ -674,13 +680,13 @@ fn load_reports(
 }
 
 fn validate_report(
-    report: &JourneyReport,
+    report: &JourneyEvidenceReport,
     expected_surface: &str,
     run_id: &str,
     expected_recipe_digest: &str,
 ) -> Result<(), EquivalenceError> {
-    if report.schema_version != JOURNEY_REPORT_SCHEMA_VERSION
-        || report.surface != expected_surface
+    if report.schema_version != JOURNEY_EVIDENCE_REPORT_SCHEMA_VERSION
+        || report.producer_surface != expected_surface
         || report.run_id != run_id
         || report.result != "passed"
         || report.source.commit.is_empty()
@@ -772,18 +778,18 @@ fn require_command_evidence(evidence: &Value) -> Result<(), EquivalenceError> {
     Ok(())
 }
 
-fn validate_artifact(root: &Path, report: &JourneyReport) -> Result<(), EquivalenceError> {
-    let expected_path = format!("{}/complete-bracket.stl", report.surface);
+fn validate_artifact(root: &Path, report: &JourneyEvidenceReport) -> Result<(), EquivalenceError> {
+    let expected_path = format!("{}/complete-bracket.stl", report.producer_surface);
     if report.artifact.path != expected_path {
         return Err(EquivalenceError::Report(format!(
             "{} artifact path is not the canonical retained STL",
-            report.surface
+            report.producer_surface
         )));
     }
     let path = safe_regular_file(
         root,
         Path::new(&report.artifact.path),
-        &format!("{} retained STL", report.surface),
+        &format!("{} retained STL", report.producer_surface),
     )?;
     let bytes = fs::read(&path).map_err(io_error)?;
     if report.artifact.bytes != bytes.len() as u64
@@ -792,7 +798,7 @@ fn validate_artifact(root: &Path, report: &JourneyReport) -> Result<(), Equivale
     {
         return Err(EquivalenceError::Report(format!(
             "{} retained STL digest or integrity record does not match",
-            report.surface
+            report.producer_surface
         )));
     }
     Ok(())
@@ -970,7 +976,7 @@ fn probe_value(
     let occupied = point_inside_mesh(mesh, point);
     if probe["occupied"].as_bool() != Some(expected) || occupied != expected {
         return Err(EquivalenceError::IndependentExpectation {
-            surface: surface.to_string(),
+            producer_surface: surface.to_string(),
             detail: format!("{category} probe {name} expected occupied={expected}, got {occupied}"),
         });
     }
@@ -1020,27 +1026,11 @@ fn vertical_surface_intersections(
     intersections
 }
 
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        left[1] * right[2] - left[2] * right[1],
-        left[2] * right[0] - left[0] * right[2],
-        left[0] * right[1] - left[1] * right[0],
-    ]
-}
-
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
-}
-
-fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
-}
-
-fn validate_surface(surface: &str) -> Result<(), EquivalenceError> {
-    JOURNEY_SURFACES
+fn validate_producer_surface(surface: &str) -> Result<(), EquivalenceError> {
+    PRODUCER_SURFACES
         .contains(&surface)
         .then_some(())
-        .ok_or_else(|| EquivalenceError::Report(format!("unknown journey surface {surface}")))
+        .ok_or_else(|| EquivalenceError::Report(format!("unknown producer surface {surface}")))
 }
 
 fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), EquivalenceError> {

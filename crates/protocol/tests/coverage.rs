@@ -56,8 +56,25 @@ fn complete_report(surface: Surface) -> JourneyReport {
             .collect(),
         adapter_exposure: registry.rows,
         executions,
-        raw_transport_methods: Vec::new(),
-        ui_controls: Vec::new(),
+        raw_transport_methods: if surface == Surface::Mcp {
+            vec![RawTransportMethod {
+                direction: "request".to_string(),
+                method: "tools/list".to_string(),
+                id: Some("fixture-list".to_string()),
+                correlation_id: Some("fixture-list".to_string()),
+            }]
+        } else {
+            Vec::new()
+        },
+        ui_controls: if surface == Surface::Tui {
+            vec![UiControlEvidence {
+                control: "preview:fixture".to_string(),
+                outcome: "ok".to_string(),
+                detail: "fixture acknowledgement".to_string(),
+            }]
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -143,6 +160,27 @@ fn evaluator_allows_a_failed_attempt_when_a_later_attempt_succeeds() {
         .expect("extrude cell exists");
     assert_eq!(extrude.execution_count, 1);
     assert_eq!(extrude.status, "passed");
+}
+
+#[test]
+fn evaluator_requires_mcp_transport_and_tui_control_evidence() {
+    let mut mcp = complete_report(Surface::Mcp);
+    mcp.raw_transport_methods.clear();
+    let mut tui = complete_report(Surface::Tui);
+    tui.ui_controls.clear();
+
+    let matrix = evaluate([
+        ReportInput::complete(complete_report(Surface::Api)),
+        ReportInput::complete(mcp),
+        ReportInput::complete(tui),
+    ]);
+
+    assert!(matrix.deltas.iter().any(|delta| {
+        delta.kind == "missing-transport-evidence" && delta.surface == Some(Surface::Mcp)
+    }));
+    assert!(matrix.deltas.iter().any(|delta| {
+        delta.kind == "missing-ui-control-evidence" && delta.surface == Some(Surface::Tui)
+    }));
 }
 
 #[test]

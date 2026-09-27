@@ -26,6 +26,7 @@ jobs:
       PODMAN_ROOTLESS: "1"
       THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
       THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS: "3600"
+      THREETERM_COVERAGE_EVIDENCE_ROOT: target/acceptance-run/journey-coverage
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,6 +60,7 @@ jobs:
               -w /workspace \
               -e "THREETERM_EXPECTED_ACCEPTANCE_RESULT=${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
               -e "THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS=${THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS}" \
+              -e "THREETERM_COVERAGE_EVIDENCE_ROOT=${THREETERM_COVERAGE_EVIDENCE_ROOT}" \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
               bash -lc '
                 set -euo pipefail
@@ -133,7 +135,6 @@ jobs:
             target/acceptance-run/logs
             target/acceptance-run/native-worker-manifest.json
             target/acceptance-run/occt-geometry-smoke/real-occt-geometry-smoke.json
-            target/acceptance-run/api-journey-coverage/api-journey-coverage.json
             target/acceptance-run/journey-coverage
             target/acceptance-run/libslvs-artifact
           if-no-files-found: error

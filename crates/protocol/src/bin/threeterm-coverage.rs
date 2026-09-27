@@ -168,10 +168,7 @@ fn ui_controls_from_transcript(transcript: &[Value]) -> Result<Vec<UiControlEvid
             .get("acknowledgement")
             .and_then(Value::as_object)
             .ok_or_else(|| format!("TUI transcript entry for {command} has no acknowledgements"))?;
-        for control in ["preview", "commit"] {
-            let Some(detail) = acknowledgements.get(control) else {
-                continue;
-            };
+        for (control, detail) in acknowledgements {
             if detail.is_null() {
                 continue;
             }

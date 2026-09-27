@@ -517,6 +517,26 @@ pub fn evaluate_with_registry(
             current,
             &report.adapter_exposure,
         );
+        if input.surface == Surface::Mcp && report.raw_transport_methods.is_empty() {
+            push_delta(
+                &mut deltas,
+                input.surface,
+                "missing-transport-evidence",
+                None,
+                "at least one retained MCP transport method",
+                "none",
+            );
+        }
+        if input.surface == Surface::Tui && report.ui_controls.is_empty() {
+            push_delta(
+                &mut deltas,
+                input.surface,
+                "missing-ui-control-evidence",
+                None,
+                "at least one retained TUI control acknowledgement",
+                "none",
+            );
+        }
         append_streams(
             &mut raw_transport_methods,
             &mut ui_controls,

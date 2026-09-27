@@ -523,6 +523,13 @@ fn write_common_coverage_report(
         .chain(second.transport.iter())
         .cloned()
         .collect();
+    assert!(
+        first
+            .protocol
+            .iter()
+            .chain(second.protocol.iter())
+            .all(|message| { message["jsonrpc"] == "2.0" })
+    );
     let source =
         coverage::capture_source_identity(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
             .expect("MCP coverage source identity is available");
@@ -540,13 +547,6 @@ fn write_common_coverage_report(
         },
     )
     .expect("MCP coverage report writes");
-    assert!(
-        first
-            .protocol
-            .iter()
-            .chain(second.protocol.iter())
-            .all(|message| { message["jsonrpc"] == "2.0" })
-    );
 }
 
 fn domain_diagnostic_schema() -> Value {
@@ -1144,6 +1144,8 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_mcp_all_tools_l_bracket() {
     require_native_worker("e2e_stl_mcp_all_tools_l_bracket");
+    coverage::remove_journey_report(&coverage::report_root(), Surface::Mcp)
+        .expect("stale MCP coverage report clears");
 
     let recipe: Value =
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");

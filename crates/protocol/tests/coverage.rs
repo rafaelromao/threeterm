@@ -204,6 +204,25 @@ fn filesystem_aggregate_consumes_all_three_retained_reports() {
 }
 
 #[test]
+fn filesystem_aggregate_rejects_reports_swapped_between_surface_paths() {
+    let root = temporary_root("swapped");
+    fs::create_dir_all(&root).expect("coverage root creates");
+    let api = complete_report(Surface::Api);
+    let mcp = complete_report(Surface::Mcp);
+    write_json_atomic(&report_path(&root, Surface::Api), &mcp).expect("swapped API report writes");
+    write_json_atomic(&report_path(&root, Surface::Mcp), &api).expect("swapped MCP report writes");
+    write_json_atomic(
+        &report_path(&root, Surface::Tui),
+        &complete_report(Surface::Tui),
+    )
+    .expect("TUI report writes");
+
+    let matrix = aggregate(&root).expect_err("swapped reports fail the aggregate");
+    assert!(matrix.contains("surface-mismatch"));
+    fs::remove_dir_all(root).expect("temporary coverage root cleans");
+}
+
+#[test]
 #[ignore = "requires the three retained production journey reports"]
 fn all_surfaces_tool_coverage_matrix() {
     let root = threeterm_protocol::coverage::report_root();

@@ -57,7 +57,8 @@ stage_report() {
     local destination="$2"
     [[ -f "$source" ]] || {
         printf 'coverage: retained report is missing: %s\n' "$source" >&2
-        exit 1
+        rm -f -- "$destination"
+        return 0
     }
     if [[ "$(realpath "$source")" != "$(realpath -m "$destination")" ]]; then
         cp -- "$source" "${destination}.tmp.$$"

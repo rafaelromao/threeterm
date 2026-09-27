@@ -2110,6 +2110,8 @@ fn e2e_stl_api_all_tools_l_bracket() {
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
     assert_complete_recipe_structure(&recipe);
 
+    coverage::remove_journey_report(&coverage::report_root(), Surface::Api)
+        .expect("stale API coverage report clears");
     let workspace = QualificationWorkspace::new();
     assert!(
         !workspace.root.exists(),

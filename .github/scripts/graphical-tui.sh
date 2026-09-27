@@ -474,6 +474,9 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         PROJECT_ROOT=''
     fi
 elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+    coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
+    mkdir -p "$coverage_root"
+    rm -f -- "$coverage_root/tui-journey-coverage.json" "$coverage_root/journey-coverage-matrix.json"
     project_parent=''
     if project_parent="$(cd "$(dirname "$PROJECT_ROOT")" 2>/dev/null && pwd)"; then
         PROJECT_ROOT="${project_parent}/$(basename "$PROJECT_ROOT")"

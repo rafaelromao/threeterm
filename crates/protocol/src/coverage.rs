@@ -557,7 +557,11 @@ pub fn evaluate_files(root: &Path) -> CoverageMatrix {
         let path = root.join(filename);
         match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<JourneyReport>(&bytes) {
-                Ok(report) => ReportInput::complete(report),
+                Ok(report) => ReportInput {
+                    surface,
+                    report: Some(report),
+                    error: None,
+                },
                 Err(error) => ReportInput::failed(surface, format!("{}: {error}", path.display())),
             },
             Err(error) => ReportInput::failed(surface, format!("{}: {error}", path.display())),
@@ -592,6 +596,15 @@ pub fn report_path(root: &Path, surface: Surface) -> std::path::PathBuf {
         .find(|(candidate, _)| *candidate == surface)
         .map(|(_, filename)| root.join(filename))
         .expect("all coverage surfaces have a report filename")
+}
+
+pub fn remove_journey_report(root: &Path, surface: Surface) -> Result<(), String> {
+    let path = report_path(root, surface);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
 }
 
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {

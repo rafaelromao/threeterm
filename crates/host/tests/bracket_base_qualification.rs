@@ -2324,7 +2324,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
                     "command_registry": saved.manifest.command_registry_hash.clone(),
                     "feature_schema": saved.manifest.feature_schema_version.clone(),
                     "protocol_schema": saved.manifest.protocol_schema_version.clone(),
-                    "project_manifest": saved.manifest.schema_version.clone(),
+                    "project_manifest_schema_version": saved.manifest.schema_version.clone(),
                 }),
                 workers: json!({
                     "project_manifest": serde_json::to_value(&saved.manifest).expect("manifest serializes"),

@@ -102,7 +102,7 @@ pub struct ArtifactRecord {
     pub path: String,
     pub bytes: u64,
     pub sha256: String,
-    pub source_revision: String,
+    pub revision_snapshot_hash: String,
     pub integrity: Option<StlIntegrityReport>,
 }
 
@@ -422,7 +422,12 @@ pub fn current_source_identity() -> Result<SourceIdentity, EquivalenceError> {
         .status()
         .map(|status| !status.success())
         .unwrap_or(true);
-    let dirty = worktree_dirty || index_dirty;
+    let untracked_dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .map(|output| !output.stdout.is_empty())
+        .unwrap_or(true);
+    let dirty = worktree_dirty || index_dirty || untracked_dirty;
     Ok(SourceIdentity { commit, dirty })
 }
 
@@ -432,7 +437,7 @@ pub fn new_journey_report(
     test: impl Into<String>,
     recipe: &Value,
     metadata: JourneyMetadata,
-    source_revision: impl Into<String>,
+    revision_snapshot_hash: impl Into<String>,
 ) -> JourneyReport {
     JourneyReport {
         schema_version: JOURNEY_REPORT_SCHEMA_VERSION.to_string(),
@@ -456,7 +461,7 @@ pub fn new_journey_report(
             path: String::new(),
             bytes: 0,
             sha256: String::new(),
-            source_revision: source_revision.into(),
+            revision_snapshot_hash: revision_snapshot_hash.into(),
             integrity: None,
         },
         evidence: metadata.evidence,
@@ -548,7 +553,11 @@ pub fn compare_three_reports(
         .ok_or_else(|| EquivalenceError::Report("no journey reports were loaded".to_string()))?;
     let mut surfaces = Vec::with_capacity(reports.len());
     for report in reports {
-        let artifact_path = root.join(&report.artifact.path);
+        let artifact_path = safe_regular_file(
+            root,
+            Path::new(&report.artifact.path),
+            &format!("{} retained STL", report.surface),
+        )?;
         let integrity = verify_path(&artifact_path).map_err(|error| {
             EquivalenceError::IndependentExpectation {
                 surface: report.surface.clone(),
@@ -639,15 +648,11 @@ fn load_reports(
     let mut reports = Vec::with_capacity(JOURNEY_SURFACES.len());
     let mut source_commit = None;
     for surface in JOURNEY_SURFACES {
-        let path = root.join(surface).join("journey.json");
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            EquivalenceError::Report(format!("{surface} journey report is unavailable: {error}"))
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Err(EquivalenceError::Report(format!(
-                "{surface} journey report is not a regular file"
-            )));
-        }
+        let path = safe_regular_file(
+            root,
+            Path::new(&format!("{surface}/journey.json")),
+            &format!("{surface} journey report"),
+        )?;
         let report: JourneyReport = serde_json::from_slice(&fs::read(&path).map_err(io_error)?)
             .map_err(|error| {
                 EquivalenceError::Report(format!("{surface} report is malformed: {error}"))
@@ -704,7 +709,7 @@ fn validate_report(
         || !has_nonempty_string(&report.schemas, "command_registry")
         || !has_nonempty_string(&report.schemas, "feature_schema")
         || !has_nonempty_string(&report.schemas, "protocol_schema")
-        || !has_nonempty_string(&report.schemas, "project_manifest")
+        || !has_nonempty_string(&report.schemas, "project_manifest_schema_version")
         || !report.workers.is_object()
         || !report.workers["project_manifest"].is_object()
         || !report.workers["occt_fingerprint"].is_object()
@@ -712,7 +717,7 @@ fn validate_report(
         || report.runtime["surface"] != expected_surface
         || !has_nonempty_string(&report.runtime, "adapter")
         || !report.evidence.is_object()
-        || report.artifact.source_revision.is_empty()
+        || report.artifact.revision_snapshot_hash.is_empty()
     {
         return Err(EquivalenceError::Report(format!(
             "{expected_surface} report is missing provenance or evidence"
@@ -768,30 +773,18 @@ fn require_command_evidence(evidence: &Value) -> Result<(), EquivalenceError> {
 }
 
 fn validate_artifact(root: &Path, report: &JourneyReport) -> Result<(), EquivalenceError> {
-    let path = Path::new(&report.artifact.path);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-    {
+    let expected_path = format!("{}/complete-bracket.stl", report.surface);
+    if report.artifact.path != expected_path {
         return Err(EquivalenceError::Report(format!(
-            "{} artifact path escapes the evidence root",
+            "{} artifact path is not the canonical retained STL",
             report.surface
         )));
     }
-    let path = root.join(path);
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        EquivalenceError::Report(format!(
-            "{} retained STL is unavailable: {error}",
-            report.surface
-        ))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(EquivalenceError::Report(format!(
-            "{} retained STL is not a regular file",
-            report.surface
-        )));
-    }
+    let path = safe_regular_file(
+        root,
+        Path::new(&report.artifact.path),
+        &format!("{} retained STL", report.surface),
+    )?;
     let bytes = fs::read(&path).map_err(io_error)?;
     if report.artifact.bytes != bytes.len() as u64
         || report.artifact.sha256 != sha256_hex(&bytes)
@@ -803,6 +796,68 @@ fn validate_artifact(root: &Path, report: &JourneyReport) -> Result<(), Equivale
         )));
     }
     Ok(())
+}
+
+fn safe_regular_file(
+    root: &Path,
+    relative: &Path,
+    label: &str,
+) -> Result<PathBuf, EquivalenceError> {
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(EquivalenceError::Report(format!(
+            "{label} path escapes the evidence root"
+        )));
+    }
+
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+        EquivalenceError::Report(format!("evidence root is unavailable: {error}"))
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return Err(EquivalenceError::Report(
+            "evidence root is not a regular directory".to_string(),
+        ));
+    }
+
+    let mut path = root.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        if let Component::CurDir = component {
+            continue;
+        }
+        let Component::Normal(name) = component else {
+            return Err(EquivalenceError::Report(format!(
+                "{label} path is not a safe relative path"
+            )));
+        };
+        path.push(name);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            EquivalenceError::Report(format!("{label} is unavailable: {error}"))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(EquivalenceError::Report(format!(
+                "{label} path contains a symlink"
+            )));
+        }
+        if components.peek().is_some() {
+            if !metadata.file_type().is_dir() {
+                return Err(EquivalenceError::Report(format!(
+                    "{label} path has a non-directory parent"
+                )));
+            }
+        } else if !metadata.file_type().is_file() {
+            return Err(EquivalenceError::Report(format!(
+                "{label} is not a regular file"
+            )));
+        }
+    }
+    Ok(path)
 }
 
 fn tolerance_policy(recipe: &Value) -> Result<TolerancePolicy, EquivalenceError> {

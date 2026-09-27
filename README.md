@@ -67,17 +67,17 @@ bash .github/scripts/test-suite.sh slow
 bash .github/scripts/acceptance.sh
 ```
 
-## Qualified Graphical Verification
+## Official Interactive Environment Verification
 
-The real Ghostty launch is intentionally separate from headless and native
-worker tiers. A qualified graphical environment must provide Weston with its
-headless backend, Ghostty `1.3.1-arch2`, `wtype`, `ydotool`, `wlr-randr`,
+The real Ghostty launch is intentionally separate from Headless Automation and
+the native Geometric Kernel worker tier. The Official Interactive Environment
+must provide Weston with its headless backend, Ghostty `1.3.1-arch2`, `wtype`, `ydotool`, `wlr-randr`,
 `grim`, Tesseract, ImageMagick, `jq`, Coreutils, and util-linux. The exact
 `--version` output tokens for those tools are recorded in
 `.github/graphical-toolchain.env` by the qualified runner environment.
 
 The named test creates a fresh L-bracket Project Generation with the real OCCT
-worker, launches the production TUI as Ghostty's child, and retains evidence
+worker, launches Interactive Modeling as Ghostty's child, and retains evidence
 under the temporary project root:
 
 ```sh
@@ -110,10 +110,10 @@ checksums.
 
 The three all-tool journey tests can publish a run-scoped evidence set for the
 cross-surface geometry gate. The aggregate is intentionally ignored by the
-ordinary workspace suite because it requires all three production surfaces,
-including qualified Ghostty. Run the API and MCP journeys with the native
-worker, run the TUI journey in the qualified graphical environment, then run
-the one named aggregate test:
+ordinary workspace suite because it requires Headless Automation through both
+API and MCP, plus Interactive Modeling in the Official Interactive Environment.
+Run the API and MCP journeys with the native worker, run the TUI journey in the
+Official Interactive Environment, then run the one named aggregate test:
 
 ```sh
 export THREETERM_JOURNEY_EVIDENCE_ROOT="$PWD/target/journey-equivalence"
@@ -127,7 +127,7 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
   cargo test -p threeterm-mcp --test production_lifecycle \
   e2e_stl_mcp_all_tools_l_bracket --jobs 1 -- \
   --include-ignored --exact --test-threads=1
-# Run this command in the qualified graphical environment.
+# Run this command in the Official Interactive Environment.
 THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
   cargo test -p threeterm-tui --test graphical_launch \
   production_tui_all_tools_stl_journey --jobs 1 -- \

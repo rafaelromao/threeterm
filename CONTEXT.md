@@ -59,6 +59,12 @@ CLI or MCP invocation of the versioned domain command API without a terminal vie
 **Interactive Modeling**:
 The graphical, direct-manipulation workflow that requires the Official Interactive Environment and its positively probed Terminal Capability Vector. It is distinct from Headless Automation and is unavailable when that capability gate fails.
 
+**Journey Evidence Report**:
+A run-scoped record of one production-path API, MCP, or Interactive Modeling journey, including its retained STL, provenance, runtime identities, and surface-specific evidence.
+
+**Producer Surface**:
+The API, MCP, or TUI boundary through which a Journey Evidence Report's production artifact was created. A Producer Surface is evidence provenance, not a geometry identity.
+
 **Command Draft**:
 An uncommitted set of explicit semantic command inputs being collected by an interactive caller. It is presentation state, not a Canonical Transaction Log entry or a model mutation.
 

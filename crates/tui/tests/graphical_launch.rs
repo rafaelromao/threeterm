@@ -2225,7 +2225,7 @@ fn production_tui_all_tools_stl_journey() {
                     "command_registry": bundle.manifest.command_registry_hash.clone(),
                     "feature_schema": bundle.manifest.feature_schema_version.clone(),
                     "protocol_schema": bundle.manifest.protocol_schema_version.clone(),
-                    "project_manifest": bundle.manifest.schema_version.clone(),
+                    "project_manifest_schema_version": bundle.manifest.schema_version.clone(),
                 }),
                 workers: json!({
                     "project_manifest": serde_json::to_value(&bundle.manifest).expect("manifest serializes"),

@@ -1483,7 +1483,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
                     "command_registry": saved.manifest.command_registry_hash.clone(),
                     "feature_schema": saved.manifest.feature_schema_version.clone(),
                     "protocol_schema": saved.manifest.protocol_schema_version.clone(),
-                    "project_manifest": saved.manifest.schema_version.clone(),
+                    "project_manifest_schema_version": saved.manifest.schema_version.clone(),
                     "mcp_protocol": PINNED_MCP_PROTOCOL_VERSION,
                 }),
                 workers: json!({

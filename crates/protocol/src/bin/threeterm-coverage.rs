@@ -72,12 +72,7 @@ fn write_tui_report(
     let test = manifest["test"]
         .as_str()
         .ok_or_else(|| "TUI manifest has no retained test name".to_string())?;
-    let adapter_exposure = markers
-        .iter()
-        .find(|marker| marker["command_name"] == "list")
-        .map(|marker| parse_contracts(&marker["adapter_exposure"]))
-        .transpose()?
-        .ok_or_else(|| "coverage log has no retained list discovery record".to_string())?;
+    let adapter_exposure = successful_list_exposure(&markers)?;
     if adapter_exposure.is_empty() {
         return Err("retained list discovery record advertises no commands".to_string());
     }
@@ -111,6 +106,19 @@ fn write_tui_report(
         ui_controls: controls,
     };
     write_json_atomic(output_path, &report)
+}
+
+fn successful_list_exposure(markers: &[Value]) -> Result<Vec<CommandContract>, String> {
+    markers
+        .iter()
+        .find(|marker| {
+            marker["command_name"] == "list"
+                && marker["outcome"] == "ok"
+                && marker["adapter_exposure"].is_array()
+        })
+        .map(|marker| parse_contracts(&marker["adapter_exposure"]))
+        .transpose()?
+        .ok_or_else(|| "coverage log has no successful list discovery record".to_string())
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
@@ -253,4 +261,37 @@ fn parse_contracts(value: &Value) -> Result<Vec<CommandContract>, String> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::successful_list_exposure;
+    use serde_json::json;
+
+    #[test]
+    fn successful_list_discovery_is_selected_after_a_failed_attempt() {
+        let markers = vec![
+            json!({
+                "command_name": "list",
+                "outcome": "failed",
+                "adapter_exposure": null
+            }),
+            json!({
+                "command_name": "list",
+                "outcome": "ok",
+                "adapter_exposure": [{
+                    "id": "list",
+                    "name": "list",
+                    "schema_version": "command/1",
+                    "request_schema_version": "request/1",
+                    "response_schema_version": "response/1",
+                    "request_schema": {},
+                    "response_schema": {}
+                }]
+            }),
+        ];
+
+        let exposure = successful_list_exposure(&markers).expect("successful list is retained");
+        assert_eq!(exposure[0].command_name, "list");
+    }
 }

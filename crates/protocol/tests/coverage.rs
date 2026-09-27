@@ -6,9 +6,30 @@ use threeterm_protocol::coverage::{
     required_commands, write_json_atomic,
 };
 
+const EXPECTED_REQUIRED_COMMANDS: &[&str] = &[
+    "list",
+    "new-project",
+    "extrude",
+    "boolean-fuse",
+    "fillet",
+    "chamfer",
+    "hole",
+    "revolve",
+    "mirror",
+    "linear-pattern",
+    "circular-pattern",
+    "shell",
+    "draft",
+    "loft",
+    "save",
+    "load",
+    "validate",
+    "export",
+];
+
 fn complete_report(surface: Surface) -> JourneyReport {
     let registry = threeterm_protocol::coverage::current_registry();
-    let executions = required_commands()
+    let executions = EXPECTED_REQUIRED_COMMANDS
         .iter()
         .enumerate()
         .map(|(step_index, command_name)| {
@@ -50,7 +71,7 @@ fn complete_report(surface: Surface) -> JourneyReport {
         result: "passed".to_string(),
         registry_hash: registry.hash,
         registry: registry.rows.clone(),
-        required_commands: required_commands()
+        required_commands: EXPECTED_REQUIRED_COMMANDS
             .iter()
             .map(|name| (*name).to_string())
             .collect(),
@@ -88,7 +109,9 @@ fn complete_reports_produce_a_required_command_matrix() {
 
     assert_eq!(matrix.result, "passed");
     assert!(matrix.deltas.is_empty());
-    assert_eq!(matrix.cells.len(), required_commands().len() * 3);
+    assert_eq!(required_commands(), EXPECTED_REQUIRED_COMMANDS);
+    assert_eq!(matrix.required_commands, expected_commands());
+    assert_eq!(matrix.cells.len(), EXPECTED_REQUIRED_COMMANDS.len() * 3);
     assert!(matrix.cells.iter().all(|cell| cell.status == "passed"));
 }
 
@@ -246,6 +269,35 @@ fn evaluator_identifies_advertised_inventory_and_schema_drift() {
 }
 
 #[test]
+fn evaluator_identifies_registry_execution_and_required_inventory_drift() {
+    let mut api = complete_report(Surface::Api);
+    api.registry_hash = "drifted-registry-hash".to_string();
+    api.registry[0].command_schema_version = "drifted-command-version".to_string();
+    api.required_commands.pop();
+
+    let mut mcp = complete_report(Surface::Mcp);
+    mcp.executions[0].command_schema_version = "drifted-execution-version".to_string();
+    mcp.executions[1].request_schema_hash = "drifted-request-schema".to_string();
+
+    let mut tui = complete_report(Surface::Tui);
+    tui.adapter_exposure[0].response_schema_version = "drifted-response-version".to_string();
+
+    let matrix = evaluate([
+        ReportInput::complete(api),
+        ReportInput::complete(mcp),
+        ReportInput::complete(tui),
+    ]);
+
+    assert_eq!(matrix.result, "failed");
+    assert_delta(&matrix, Surface::Api, "registry-hash-drift");
+    assert_delta(&matrix, Surface::Api, "schema-drift");
+    assert_delta(&matrix, Surface::Api, "required-inventory-drift");
+    assert_delta(&matrix, Surface::Mcp, "execution-version-drift");
+    assert_delta(&matrix, Surface::Mcp, "execution-schema-drift");
+    assert_delta(&matrix, Surface::Tui, "adapter-schema-drift");
+}
+
+#[test]
 fn evaluator_identifies_a_wrong_journey_test_for_a_surface() {
     let mut report = complete_report(Surface::Api);
     report.test = "different-journey".to_string();
@@ -289,9 +341,39 @@ fn filesystem_aggregate_consumes_all_three_retained_reports() {
 
     let matrix = aggregate(&root).expect("complete reports pass the aggregate");
     assert_eq!(matrix.result, "passed");
-    assert_eq!(matrix.cells.len(), required_commands().len() * 3);
+    assert_eq!(matrix.cells.len(), EXPECTED_REQUIRED_COMMANDS.len() * 3);
     assert!(root.join("journey-coverage-matrix.json").is_file());
     fs::remove_dir_all(root).expect("temporary coverage root cleans");
+}
+
+#[test]
+fn filesystem_aggregate_fails_closed_for_invalid_retained_reports() {
+    assert_filesystem_failure("malformed", "missing-report", |root| {
+        fs::write(report_path(root, Surface::Api), b"{").expect("malformed report writes");
+    });
+    assert_filesystem_failure("incomplete", "missing-execution", |root| {
+        let mut report = complete_report(Surface::Api);
+        report.executions.clear();
+        write_json_atomic(&report_path(root, Surface::Api), &report)
+            .expect("incomplete report writes");
+    });
+    assert_filesystem_failure("failed", "journey-failed", |root| {
+        let mut report = complete_report(Surface::Api);
+        report.result = "failed".to_string();
+        write_json_atomic(&report_path(root, Surface::Api), &report).expect("failed report writes");
+    });
+    assert_filesystem_failure("recipe", "recipe-version-drift", |root| {
+        let mut report = complete_report(Surface::Api);
+        report.recipe_schema_version = "threeterm.recipe.other/1".to_string();
+        write_json_atomic(&report_path(root, Surface::Api), &report)
+            .expect("recipe-drifted report writes");
+    });
+    assert_filesystem_failure("source", "source-mismatch", |root| {
+        let mut report = complete_report(Surface::Api);
+        report.source.commit = "fedcba9876543210fedcba9876543210fedcba98".to_string();
+        write_json_atomic(&report_path(root, Surface::Api), &report)
+            .expect("source-mismatched report writes");
+    });
 }
 
 #[test]
@@ -324,4 +406,49 @@ fn all_surfaces_tool_coverage_matrix() {
 
 fn temporary_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("threeterm-coverage-{name}-{}", std::process::id()))
+}
+
+fn expected_commands() -> Vec<String> {
+    EXPECTED_REQUIRED_COMMANDS
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect()
+}
+
+fn assert_delta(
+    matrix: &threeterm_protocol::coverage::CoverageMatrix,
+    surface: Surface,
+    kind: &str,
+) {
+    assert!(
+        matrix
+            .deltas
+            .iter()
+            .any(|delta| delta.surface == Some(surface) && delta.kind == kind),
+        "missing {surface:?} {kind} delta: {:?}",
+        matrix.deltas
+    );
+}
+
+fn assert_filesystem_failure(
+    name: &str,
+    expected_delta: &str,
+    mutate: impl FnOnce(&std::path::Path),
+) {
+    let root = temporary_root(name);
+    fs::create_dir_all(&root).expect("coverage root creates");
+    for surface in [Surface::Api, Surface::Mcp, Surface::Tui] {
+        let report = complete_report(surface);
+        write_json_atomic(&report_path(&root, surface), &report).expect("journey report writes");
+    }
+    mutate(&root);
+
+    let error = aggregate(&root).expect_err("invalid reports fail the aggregate");
+    assert!(error.contains(expected_delta), "{error}");
+    let matrix: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join("journey-coverage-matrix.json")).expect("matrix is retained"),
+    )
+    .expect("matrix is JSON");
+    assert_eq!(matrix["result"], "failed");
+    fs::remove_dir_all(root).expect("temporary coverage root cleans");
 }

@@ -2424,10 +2424,10 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "retained evidence omits ok outcome for {required}"
         );
     }
-    write_common_coverage_report(&evidence, &Value::Array(listed.to_vec()));
     drop(workspace);
     assert!(
         evidence_path.is_file(),
         "retained journey evidence survives workspace cleanup"
     );
+    write_common_coverage_report(&evidence, &Value::Array(listed.to_vec()));
 }

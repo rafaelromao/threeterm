@@ -2577,6 +2577,11 @@ write_manifest() {
 
 write_common_coverage_report() {
     [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]] || return 0
+    if grep -aFq 'outcome=coverage-write-failed' "$PTY_OUTPUT" 2>/dev/null; then
+        failure_code='coverage_log_write_failed'
+        failure_detail='the TUI could not retain one or more tool coverage records'
+        return 1
+    fi
     local coverage_binary="${THREETERM_COVERAGE_BINARY:-}"
     if [[ -z "$coverage_binary" ]]; then
         local target_root="${CARGO_TARGET_DIR:-${ROOT}/target}"

@@ -69,6 +69,7 @@ stage_report() {
 stage_report "$API_REPORT" "${EVIDENCE_ROOT}/api-journey-coverage.json"
 stage_report "$MCP_REPORT" "${EVIDENCE_ROOT}/mcp-journey-coverage.json"
 stage_report "$TUI_REPORT" "${EVIDENCE_ROOT}/tui-journey-coverage.json"
+rm -f -- "${EVIDENCE_ROOT}/journey-coverage-matrix.json"
 
 export THREETERM_COVERAGE_EVIDENCE_ROOT="$EVIDENCE_ROOT"
 exec cargo test -p threeterm-protocol --test coverage all_surfaces_tool_coverage_matrix \

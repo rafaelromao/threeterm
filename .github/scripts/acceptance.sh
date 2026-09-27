@@ -49,6 +49,10 @@ if ! mkdir -p "${LOG_ROOT}"; then
     printf '%s\n' 'acceptance catalog: unable to create acceptance log directory' >&2
     exit 1
 fi
+rm -f -- "${CARGO_TARGET_DIR}/journey-coverage/api-journey-coverage.json" \
+    "${CARGO_TARGET_DIR}/journey-coverage/mcp-journey-coverage.json" \
+    "${CARGO_TARGET_DIR}/journey-coverage/tui-journey-coverage.json" \
+    "${CARGO_TARGET_DIR}/journey-coverage/journey-coverage-matrix.json"
 
 readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE JOURNEY_EVIDENCE MATRIX_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
 export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE

@@ -47,11 +47,14 @@ while (($# > 0)); do
     esac
 done
 
+API_REPORT="${API_REPORT:-${EVIDENCE_ROOT}/api-journey-coverage.json}"
+MCP_REPORT="${MCP_REPORT:-${EVIDENCE_ROOT}/mcp-journey-coverage.json}"
+TUI_REPORT="${TUI_REPORT:-${EVIDENCE_ROOT}/tui-journey-coverage.json}"
+
 mkdir -p "$EVIDENCE_ROOT"
 stage_report() {
     local source="$1"
     local destination="$2"
-    [[ -n "$source" ]] || return 0
     [[ -f "$source" ]] || {
         printf 'coverage: retained report is missing: %s\n' "$source" >&2
         exit 1

@@ -267,7 +267,10 @@ run_gate coverage.all-surfaces \
     'all retained API, MCP, and TUI reports pass the named coverage matrix' \
     bash -e -u -o pipefail -c '
         bash "${ROOT}/.github/scripts/all-surfaces-tool-coverage.sh" \
-            --evidence-root "${CARGO_TARGET_DIR}/journey-coverage"
+            --evidence-root "${CARGO_TARGET_DIR}/journey-coverage" \
+            --api-report "${CARGO_TARGET_DIR}/journey-coverage/api-journey-coverage.json" \
+            --mcp-report "${CARGO_TARGET_DIR}/journey-coverage/mcp-journey-coverage.json" \
+            --tui-report "${CARGO_TARGET_DIR}/journey-coverage/tui-journey-coverage.json"
     '
 
 run_gate workflow.box-with-lid \

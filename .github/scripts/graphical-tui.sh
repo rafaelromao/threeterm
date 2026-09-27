@@ -2608,6 +2608,13 @@ write_common_coverage_report() {
         }
         return 1
     }
+    [[ -f "$MANIFEST" && -f "$ALL_TOOLS_TRANSCRIPT" && -f "$ALL_TOOLS_DISCOVERY" && -f "$TOOL_COVERAGE_LOG" ]] || {
+        [[ "$success" == 1 ]] && {
+            failure_code='coverage_evidence_incomplete'
+            failure_detail='the all-tools journey did not retain every coverage input'
+        }
+        return 1
+    }
     local coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
     mkdir -p "$coverage_root" || return 1
     "$coverage_binary" tui-report \

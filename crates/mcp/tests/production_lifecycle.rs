@@ -1226,8 +1226,13 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
     }
 
     let list_contract = find_by_name("list").expect("list is registered");
-    let listed = client.call_tool("list-command", list_contract.schema_version, json!({}));
-    let listed = structured_tool_success(&listed, "list-command");
+    let listed_result = client.call_tool("list-command", list_contract.schema_version, json!({}));
+    let listed_result = assert_protocol_success(&listed_result, "list-command");
+    assert_eq!(listed_result["isError"], false, "MCP list command failed");
+    let listed_text = listed_result["content"][0]["text"]
+        .as_str()
+        .expect("MCP list command includes text content");
+    let listed: Value = serde_json::from_str(listed_text).expect("MCP list content is JSON");
     validate(
         &find_by_name("list")
             .expect("list is registered")

@@ -67,17 +67,17 @@ bash .github/scripts/test-suite.sh slow
 bash .github/scripts/acceptance.sh
 ```
 
-## Qualified Graphical Verification
+## Official Interactive Environment Verification
 
-The real Ghostty launch is intentionally separate from headless and native
-worker tiers. A qualified graphical environment must provide Weston with its
-headless backend, Ghostty `1.3.1-arch2`, `wtype`, `ydotool`, `wlr-randr`,
+The real Ghostty launch is intentionally separate from Headless Automation and
+the native Geometric Kernel worker tier. The Official Interactive Environment
+must provide Weston with its headless backend, Ghostty `1.3.1-arch2`, `wtype`, `ydotool`, `wlr-randr`,
 `grim`, Tesseract, ImageMagick, `jq`, Coreutils, and util-linux. The exact
 `--version` output tokens for those tools are recorded in
 `.github/graphical-toolchain.env` by the qualified runner environment.
 
 The named test creates a fresh L-bracket Project Generation with the real OCCT
-worker, launches the production TUI as Ghostty's child, and retains evidence
+worker, launches Interactive Modeling as Ghostty's child, and retains evidence
 under the temporary project root:
 
 ```sh
@@ -105,6 +105,45 @@ The manual native E2E workflow remains available for focused test-tier runs.
 The acceptance catalog is the production closure command and records the exact
 source commit, schema and worker identities, gate outcomes, and artifact
 checksums.
+
+### Three-surface geometric equivalence
+
+The three all-tool journey tests can publish one Journey Evidence Report per
+Producer Surface for the geometric equivalence gate. The aggregate is intentionally ignored by the
+ordinary workspace suite because it requires Headless Automation through both
+API and MCP, plus Interactive Modeling in the Official Interactive Environment.
+Run the API and MCP journeys with the native worker, run the TUI journey in the
+Official Interactive Environment, then run the one named aggregate test:
+
+```sh
+export THREETERM_JOURNEY_EVIDENCE_ROOT="$PWD/target/journey-equivalence"
+export THREETERM_JOURNEY_RUN_ID="$(git rev-parse HEAD)-$(date +%s)"
+
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+  cargo test -p threeterm-host --test bracket_base_qualification \
+  e2e_stl_api_all_tools_l_bracket --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+  cargo test -p threeterm-mcp --test production_lifecycle \
+  e2e_stl_mcp_all_tools_l_bracket --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+# Run this command in the Official Interactive Environment.
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+  cargo test -p threeterm-tui --test graphical_launch \
+  production_tui_all_tools_stl_journey --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+cargo test -p threeterm-host --test bracket_equivalence \
+  e2e_stl_three_surface_geometric_equivalence --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+```
+
+The aggregate independently verifies each Producer Surface's retained STL against the frozen
+recipe before comparing dimensions, volume, topology, voids, landmarks, and
+surface samples. It writes `geometric-equivalence.json` on pass or failure;
+all journey and aggregate reports are stored under the run ID within the
+configured evidence root;
+raw STL bytes, facet order, generated identities, timestamps, paths, and
+transaction IDs are not equivalence keys.
 
 ## Compatibility contract
 

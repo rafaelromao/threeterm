@@ -72,7 +72,7 @@ fn mesh_vector3(value: &Value, field: &str) -> [f64; 3] {
         .unwrap_or_else(|error| panic!("mesh recipe field {field} is a 3-vector: {error}"))
 }
 
-fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+pub(crate) fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [
         left[1] * right[2] - left[2] * right[1],
         left[2] * right[0] - left[0] * right[2],
@@ -80,11 +80,11 @@ fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
+pub(crate) fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
-fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+pub(crate) fn subtract(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
     [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
 }
 
@@ -107,6 +107,11 @@ fn point_inside(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// Probe material occupancy without repairing or welding the observed mesh.
+pub fn point_inside_mesh(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
+    point_inside(mesh, point)
 }
 
 fn ray_parity(point: [f64; 3], direction: [f64; 3], mesh: &StlMeshObservation) -> Option<bool> {

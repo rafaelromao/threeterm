@@ -7,6 +7,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use threeterm_host::Host;
+use threeterm_host::bracket_equivalence::{
+    JourneyMetadata, configured_run_id, current_source_identity, evidence_root,
+    new_journey_evidence_report, publish_journey_evidence_report,
+};
 use threeterm_host::bracket_oracle::{
     assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents, mesh_number,
     number, profile_bounds, recipe_steps, selected_edge_from_recipe, step_for_feature, vector3,
@@ -279,6 +283,16 @@ fn assert_complete_recipe_structure(complete: &Value) {
             "angular_rad": 0.000001,
             "volume_fraction": 0.05
         })
+    );
+    let equivalence = &complete["frozen"]["equivalence"];
+    assert_eq!(equivalence["void_probes"].as_array().map(Vec::len), Some(3));
+    assert_eq!(
+        equivalence["landmark_probes"].as_array().map(Vec::len),
+        Some(8)
+    );
+    assert_eq!(
+        equivalence["surface_samples"].as_array().map(Vec::len),
+        Some(6)
     );
     assert_eq!(
         complete["frozen"]["mesh"],
@@ -1997,10 +2011,10 @@ fn record_evidence(
 }
 
 fn journey_evidence_root() -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
-        .join("api-journey-coverage")
+    let root = evidence_root();
+    configured_run_id()
+        .map(|run_id| root.join(run_id).join("api"))
+        .unwrap_or_else(|| root.join("api-journey-coverage"))
 }
 
 fn write_journey_evidence(path: &Path, evidence: &Value) {
@@ -2417,6 +2431,44 @@ fn e2e_stl_api_all_tools_l_bracket() {
                 .any(|entry| entry["command"] == *required),
             "retained evidence omits required command {required}"
         );
+    }
+    if let Some(run_id) = configured_run_id() {
+        let source = current_source_identity().expect("application source identity is available");
+        let worker = OcctWorker::locate()
+            .expect("retained journey requires the selected OCCT worker")
+            .verify_identity()
+            .expect("retained journey records the selected OCCT fingerprint");
+        let report = new_journey_evidence_report(
+            run_id,
+            "api",
+            "e2e_stl_api_all_tools_l_bracket",
+            &recipe,
+            JourneyMetadata {
+                source,
+                schemas: json!({
+                    "command_registry": saved.manifest.command_registry_hash.clone(),
+                    "feature_schema": saved.manifest.feature_schema_version.clone(),
+                    "protocol_schema": saved.manifest.protocol_schema_version.clone(),
+                    "project_manifest_schema_version": saved.manifest.schema_version.clone(),
+                }),
+                workers: json!({
+                    "project_manifest": serde_json::to_value(&saved.manifest).expect("manifest serializes"),
+                    "occt_fingerprint": serde_json::to_value(worker).expect("worker fingerprint serializes"),
+                }),
+                runtime: json!({
+                    "producer_surface": "api",
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "adapter": "public-host-dispatcher",
+                }),
+                evidence: json!({"executions": evidence}),
+            },
+            validated["revision_hash"]
+                .as_str()
+                .expect("validated revision is a string"),
+        );
+        publish_journey_evidence_report(&evidence_root(), report, &stl_path)
+            .expect("API journey evidence publishes for equivalence");
     }
     drop(workspace);
     assert!(

@@ -8,6 +8,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_host::bracket_equivalence::{
+    JourneyMetadata, configured_run_id, current_source_identity, evidence_root,
+    new_journey_evidence_report, publish_journey_evidence_report,
+};
 use threeterm_host::bracket_oracle::{
     assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents, mesh_number,
     recipe_steps, selected_edge_from_recipe,
@@ -1606,6 +1610,70 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
             .find(|(recorded, _, _, _)| recorded.command_name == *command_name)
             .unwrap_or_else(|| panic!("journey evidence omits required command {command_name}"));
         assert_correlated_structured_ok(&chained_protocol, call_id, command_name);
+    }
+    if let Some(run_id) = configured_run_id() {
+        let source = current_source_identity().expect("application source identity is available");
+        let worker = OcctWorker::locate()
+            .expect("retained journey requires the selected OCCT worker")
+            .verify_identity()
+            .expect("retained journey records the selected OCCT fingerprint");
+        let protocol: Vec<Value> = first_evidence
+            .protocol
+            .iter()
+            .chain(second_evidence.protocol.iter())
+            .cloned()
+            .collect();
+        let protocol_errors: Vec<Value> = first_evidence
+            .protocol_errors
+            .iter()
+            .chain(second_evidence.protocol_errors.iter())
+            .cloned()
+            .collect();
+        let domain_errors: Vec<Value> = first_evidence
+            .domain_errors
+            .iter()
+            .chain(second_evidence.domain_errors.iter())
+            .cloned()
+            .collect();
+        let report = new_journey_evidence_report(
+            run_id,
+            "mcp",
+            "e2e_stl_mcp_all_tools_l_bracket",
+            &recipe,
+            JourneyMetadata {
+                source,
+                schemas: json!({
+                    "command_registry": saved.manifest.command_registry_hash.clone(),
+                    "feature_schema": saved.manifest.feature_schema_version.clone(),
+                    "protocol_schema": saved.manifest.protocol_schema_version.clone(),
+                    "project_manifest_schema_version": saved.manifest.schema_version.clone(),
+                    "mcp_protocol": PINNED_MCP_PROTOCOL_VERSION,
+                }),
+                workers: json!({
+                    "project_manifest": serde_json::to_value(&saved.manifest).expect("manifest serializes"),
+                    "occt_fingerprint": serde_json::to_value(worker).expect("worker fingerprint serializes"),
+                }),
+                runtime: json!({
+                    "producer_surface": "mcp",
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "adapter": "production-mcp-stdio",
+                    "protocol": PINNED_MCP_PROTOCOL_VERSION,
+                }),
+                evidence: json!({
+                    "restart": true,
+                    "calls": journey_evidence,
+                    "protocol": protocol,
+                    "protocol_errors": protocol_errors,
+                    "domain_errors": domain_errors,
+                    "first_server_diagnostics": first_evidence.server_diagnostics,
+                    "second_server_diagnostics": second_evidence.server_diagnostics,
+                }),
+            },
+            finished_revision,
+        );
+        publish_journey_evidence_report(&evidence_root(), report, &stl_path)
+            .expect("MCP journey evidence publishes for equivalence");
     }
     write_common_coverage_report(&journey_evidence, &tools, &first_evidence, &second_evidence);
 }

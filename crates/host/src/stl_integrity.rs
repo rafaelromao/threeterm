@@ -10,6 +10,8 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
+use serde::{Deserialize, Serialize, de::Deserializer};
+
 /// Tolerance used only for robust containment/intersection predicates. Vertex
 /// identity, facet area, and signed volume remain exact decoded values.
 pub const GEOMETRIC_EPSILON: f64 = 1.0e-10;
@@ -18,7 +20,7 @@ pub const COORDINATE_IDENTITY_POLICY: &str =
     "exact decoded STL coordinates with canonicalized negative zero; no welding";
 
 /// Explicit policy recorded with every successful verification report.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct StlIntegrityPolicy {
     pub model_units: &'static str,
     pub coordinate_identity: &'static str,
@@ -35,8 +37,37 @@ pub const VALIDATION_POLICY: StlIntegrityPolicy = StlIntegrityPolicy {
     signed_volume_threshold: 0.0,
 };
 
+impl<'de> Deserialize<'de> for StlIntegrityPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct EncodedPolicy {
+            model_units: String,
+            coordinate_identity: String,
+            geometric_epsilon: f64,
+            area_squared_threshold: f64,
+            signed_volume_threshold: f64,
+        }
+
+        let encoded = EncodedPolicy::deserialize(deserializer)?;
+        if encoded.model_units != MODEL_UNITS_POLICY
+            || encoded.coordinate_identity != COORDINATE_IDENTITY_POLICY
+            || encoded.geometric_epsilon != GEOMETRIC_EPSILON
+            || encoded.area_squared_threshold != 0.0
+            || encoded.signed_volume_threshold != 0.0
+        {
+            return Err(serde::de::Error::custom(
+                "unsupported STL validation policy",
+            ));
+        }
+        Ok(VALIDATION_POLICY)
+    }
+}
+
 /// STL encoding selected by the strict parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StlFormat {
     Ascii,
     Binary,
@@ -119,7 +150,7 @@ pub struct IntegrityLocation {
 }
 
 /// Summary of a verified STL mesh.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StlIntegrityReport {
     pub policy: StlIntegrityPolicy,
     pub format: StlFormat,

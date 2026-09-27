@@ -8,9 +8,14 @@ publish.workspace = true
 description = "End-to-end adversarial rehearsal harness."
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 threeterm-cli = { path = "../cli" }
+threeterm-host = { path = "../host" }
 threeterm-occt-worker = { path = "../workers/occt" }
+threeterm-persistence = { path = "../persistence" }
+threeterm-protocol = { path = "../protocol" }
 
 [lints]
 workspace = true

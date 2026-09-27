@@ -520,7 +520,9 @@ pub fn publish_journey_evidence_report(
     let artifact_tmp =
         surface_root.join(format!(".complete-bracket.stl.{}.tmp", std::process::id()));
     copy_file_exclusive(source_stl, &artifact_tmp)?;
-    fs::rename(&artifact_tmp, &artifact_path).map_err(io_error)?;
+    let publish_result = fs::hard_link(&artifact_tmp, &artifact_path).map_err(io_error);
+    let cleanup_result = fs::remove_file(&artifact_tmp).map_err(io_error);
+    publish_result.and(cleanup_result)?;
 
     let integrity = verify_path(&artifact_path).map_err(|error| {
         EquivalenceError::Report(format!(
@@ -763,6 +765,7 @@ fn validate_report(
         || !has_nonempty_strings(&report.runtime, &["os", "arch", "adapter"])
         || !report.evidence.is_object()
         || !is_hex_identity(&report.artifact.revision_snapshot_hash, &[64])
+        || !provenance_matches(report)
     {
         return Err(EquivalenceError::Report(format!(
             "{expected_surface} report is missing provenance or evidence"
@@ -806,6 +809,19 @@ fn has_nonempty_strings(value: &Value, fields: &[&str]) -> bool {
 
 fn is_hex_identity(value: &str, lengths: &[usize]) -> bool {
     lengths.contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn provenance_matches(report: &JourneyEvidenceReport) -> bool {
+    let manifest = &report.workers["project_manifest"];
+    let worker = &report.workers["occt_fingerprint"];
+    report.artifact.revision_snapshot_hash == manifest["revision_hash"]
+        && report.schemas["command_registry"] == manifest["command_registry_hash"]
+        && report.schemas["feature_schema"] == manifest["feature_schema_version"]
+        && report.schemas["protocol_schema"] == manifest["protocol_schema_version"]
+        && report.schemas["project_manifest_schema_version"] == manifest["schema_version"]
+        && worker["worker_kind"] == manifest["occt_worker"]["worker_kind"]
+        && worker["worker_schema_version"] == manifest["occt_worker"]["worker_schema_version"]
+        && worker["protocol_schema_version"] == manifest["occt_worker"]["protocol_schema_version"]
 }
 
 fn require_command_evidence(evidence: &Value) -> Result<(), EquivalenceError> {
@@ -1145,7 +1161,8 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Equ
             .map_err(io_error)?;
         file.write_all(&bytes).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
-        fs::rename(&temporary, path).map_err(io_error)
+        fs::hard_link(&temporary, path).map_err(io_error)?;
+        fs::remove_file(&temporary).map_err(io_error)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);

@@ -108,8 +108,8 @@ checksums.
 
 ### Three-surface geometric equivalence
 
-The three all-tool journey tests can publish a run-scoped evidence set for the
-cross-surface geometry gate. The aggregate is intentionally ignored by the
+The three all-tool journey tests can publish one Journey Evidence Report per
+Producer Surface for the geometric equivalence gate. The aggregate is intentionally ignored by the
 ordinary workspace suite because it requires Headless Automation through both
 API and MCP, plus Interactive Modeling in the Official Interactive Environment.
 Run the API and MCP journeys with the native worker, run the TUI journey in the
@@ -137,7 +137,7 @@ cargo test -p threeterm-host --test bracket_equivalence \
   --include-ignored --exact --test-threads=1
 ```
 
-The aggregate independently verifies each retained STL against the frozen
+The aggregate independently verifies each Producer Surface's retained STL against the frozen
 recipe before comparing dimensions, volume, topology, voids, landmarks, and
 surface samples. It writes `geometric-equivalence.json` on pass or failure;
 all journey and aggregate reports are stored under the run ID within the

@@ -124,21 +124,22 @@ fn retained_journey_publication_copies_and_hashes_the_artifact() {
         .join("../../docs/research/rehearsal-evidence/l-bracket/run-2/export/l-bracket.stl");
     fs::create_dir_all(&root).expect("report fixture root creates");
     fs::copy(fixture, &source).expect("report fixture copies");
+    let metadata = JourneyMetadata {
+        source: SourceIdentity {
+            commit: "a".repeat(40),
+            dirty: false,
+        },
+        schemas: serde_json::json!({"command_registry": "registry"}),
+        workers: serde_json::json!({"occt": "worker"}),
+        runtime: serde_json::json!({"adapter": "test"}),
+        evidence: serde_json::json!({"executions": []}),
+    };
     let report = new_journey_evidence_report(
         "run-report-test",
         "api",
         "e2e_stl_api_all_tools_l_bracket",
         &recipe,
-        JourneyMetadata {
-            source: SourceIdentity {
-                commit: "a".repeat(40),
-                dirty: false,
-            },
-            schemas: serde_json::json!({"command_registry": "registry"}),
-            workers: serde_json::json!({"occt": "worker"}),
-            runtime: serde_json::json!({"adapter": "test"}),
-            evidence: serde_json::json!({"executions": []}),
-        },
+        metadata.clone(),
         "revision",
     );
     let report_path = publish_journey_evidence_report(&root, report, &source)
@@ -151,6 +152,18 @@ fn retained_journey_publication_copies_and_hashes_the_artifact() {
     assert!(
         root.join("run-report-test/api/complete-bracket.stl")
             .is_file()
+    );
+    let duplicate = new_journey_evidence_report(
+        "run-report-test",
+        "api",
+        "e2e_stl_api_all_tools_l_bracket",
+        &recipe,
+        metadata,
+        "revision",
+    );
+    assert!(
+        publish_journey_evidence_report(&root, duplicate, &source).is_err(),
+        "a run-scoped producer report cannot overwrite retained evidence"
     );
     fs::remove_dir_all(root).expect("report fixture root removes");
 }

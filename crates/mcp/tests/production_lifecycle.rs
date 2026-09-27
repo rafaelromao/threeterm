@@ -20,6 +20,9 @@ use threeterm_host::stl_integrity::{self, StlFormat};
 use threeterm_occt_worker::OcctWorker;
 use threeterm_persistence::{Bundle, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION};
 use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::coverage::{
+    self, CommandContract, ExecutionEvidence, JourneyStreams, RawTransportMethod, Surface,
+};
 use threeterm_protocol::schema::{
     BRACKET_COMMAND_ID, EXPORT_COMMAND_ID, EXTRUDE_COMMAND_ID, IDENTITY_COMMAND_ID,
     LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID, VALIDATE_COMMAND_ID, find,
@@ -37,6 +40,7 @@ type StreamLine = Result<Vec<u8>, String>;
 #[derive(Debug)]
 struct McpEvidence {
     protocol: Vec<Value>,
+    transport: Vec<RawTransportMethod>,
     protocol_errors: Vec<Value>,
     server_diagnostics: String,
     domain_errors: Vec<Value>,
@@ -49,6 +53,7 @@ struct McpProcess {
     stdout_thread: Option<JoinHandle<()>>,
     stderr_thread: Option<JoinHandle<Result<Vec<u8>, String>>>,
     protocol: Vec<Value>,
+    transport: Vec<RawTransportMethod>,
     pending: BTreeMap<String, Value>,
     protocol_errors: Vec<Value>,
     domain_errors: Vec<Value>,
@@ -110,6 +115,7 @@ impl McpProcess {
             stdout_thread: Some(stdout_thread),
             stderr_thread: Some(stderr_thread),
             protocol: Vec::new(),
+            transport: Vec::new(),
             pending: BTreeMap::new(),
             protocol_errors: Vec::new(),
             domain_errors: Vec::new(),
@@ -117,6 +123,24 @@ impl McpProcess {
     }
 
     fn send(&mut self, request: &Value) {
+        let method = request["method"]
+            .as_str()
+            .expect("MCP transport request has a method")
+            .to_string();
+        let id = request
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.transport.push(RawTransportMethod {
+            direction: if id.is_some() {
+                "request".to_string()
+            } else {
+                "notification".to_string()
+            },
+            method,
+            correlation_id: id.clone(),
+            id,
+        });
         let mut bytes = serde_json::to_vec(request).expect("MCP request serializes");
         bytes.push(b'\n');
         let stdin = self.stdin.as_mut().expect("MCP stdin remains open");
@@ -239,6 +263,7 @@ impl McpProcess {
 
         McpEvidence {
             protocol: std::mem::take(&mut self.protocol),
+            transport: std::mem::take(&mut self.transport),
             protocol_errors: std::mem::take(&mut self.protocol_errors),
             server_diagnostics: String::from_utf8_lossy(&stderr).into_owned(),
             domain_errors: std::mem::take(&mut self.domain_errors),
@@ -433,6 +458,99 @@ fn advertised_tools(client: &mut McpProcess) -> Vec<Value> {
         );
     }
     pages
+}
+
+fn advertised_contracts(tools: &[Value]) -> Vec<CommandContract> {
+    tools
+        .iter()
+        .map(|tool| {
+            let advertised_name = tool["name"]
+                .as_str()
+                .expect("advertised MCP tool name is a string");
+            let input_schema = &tool["inputSchema"];
+            let output_schema = &tool["outputSchema"];
+            // MCP uses the registered schema version as the wire tool name;
+            // request IDs such as "create" are transport correlations only.
+            if let Some(registered) = iter().find(|entry| entry.schema_version == advertised_name) {
+                CommandContract {
+                    command_id: registered.id.0.to_string(),
+                    command_name: registered.name.to_string(),
+                    command_schema_version: registered.schema_version.to_string(),
+                    request_schema_version: registered.request_schema_version.to_string(),
+                    response_schema_version: registered.response_schema_version.to_string(),
+                    request_schema_hash: coverage::schema_hash(input_schema),
+                    response_schema_hash: coverage::schema_hash(output_schema),
+                }
+            } else {
+                CommandContract {
+                    command_id: format!("unsupported:{advertised_name}"),
+                    command_name: advertised_name.to_string(),
+                    command_schema_version: advertised_name.to_string(),
+                    request_schema_version: "unknown".to_string(),
+                    response_schema_version: "unknown".to_string(),
+                    request_schema_hash: coverage::schema_hash(input_schema),
+                    response_schema_hash: coverage::schema_hash(output_schema),
+                }
+            }
+        })
+        .collect()
+}
+
+fn write_common_coverage_report(
+    journey_evidence: &[(CommandContract, String, String, String)],
+    tools: &[Value],
+    first: &McpEvidence,
+    second: &McpEvidence,
+) {
+    let executions = journey_evidence
+        .iter()
+        .enumerate()
+        .map(
+            |(step_index, (contract, call_id, response_payload_hash, outcome))| ExecutionEvidence {
+                command_id: contract.command_id.clone(),
+                command_name: contract.command_name.clone(),
+                command_schema_version: contract.command_schema_version.clone(),
+                request_schema_version: contract.request_schema_version.clone(),
+                response_schema_version: contract.response_schema_version.clone(),
+                request_schema_hash: contract.request_schema_hash.clone(),
+                response_schema_hash: contract.response_schema_hash.clone(),
+                response_payload_hash: response_payload_hash.clone(),
+                outcome: outcome.clone(),
+                step_index: Some(step_index as u32),
+                evidence_id: format!("mcp-{step_index}-{call_id}"),
+            },
+        )
+        .collect();
+    let raw_transport_methods = first
+        .transport
+        .iter()
+        .chain(second.transport.iter())
+        .cloned()
+        .collect();
+    assert!(
+        first
+            .protocol
+            .iter()
+            .chain(second.protocol.iter())
+            .all(|message| { message["jsonrpc"] == "2.0" })
+    );
+    let source =
+        coverage::capture_source_identity(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("MCP coverage source identity is available");
+    coverage::write_journey_report_with_exposure(
+        &coverage::report_root(),
+        Surface::Mcp,
+        "e2e_stl_mcp_all_tools_l_bracket",
+        "passed",
+        source,
+        advertised_contracts(tools),
+        JourneyStreams {
+            executions,
+            raw_transport_methods,
+            ..JourneyStreams::default()
+        },
+    )
+    .expect("MCP coverage report writes");
 }
 
 fn domain_diagnostic_schema() -> Value {
@@ -851,11 +969,10 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
     assert_protocol_success(&initialized, "restart-initialize");
     restarted.notify("notifications/initialized", json!({}));
 
+    let load_contract = find(LOAD_COMMAND_ID).expect("load is registered");
     let loaded = restarted.call_tool(
         "load",
-        find(LOAD_COMMAND_ID)
-            .expect("load is registered")
-            .schema_version,
+        load_contract.schema_version,
         json!({"bundle_path": project.to_string_lossy()}),
     );
     let loaded = structured_tool_success(&loaded, "load");
@@ -1030,6 +1147,8 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_mcp_all_tools_l_bracket() {
+    coverage::remove_journey_report(&coverage::report_root(), Surface::Mcp)
+        .expect("stale MCP coverage report clears");
     require_native_worker("e2e_stl_mcp_all_tools_l_bracket");
 
     let recipe: Value =
@@ -1053,7 +1172,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         "journey starts with no export fixture"
     );
 
-    let mut journey_evidence: Vec<(String, String)> = Vec::new();
+    let mut journey_evidence: Vec<(CommandContract, String, String, String)> = Vec::new();
     let mut client = McpProcess::spawn();
     let initialized = client.request(
         "initialize",
@@ -1110,11 +1229,32 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         );
     }
 
+    let list_contract = find_by_name("list").expect("list is registered");
+    let listed_result = client.call_tool("list-command", list_contract.schema_version, json!({}));
+    let listed_result = assert_protocol_success(&listed_result, "list-command");
+    assert_eq!(listed_result["isError"], false, "MCP list command failed");
+    let listed_text = listed_result["content"][0]["text"]
+        .as_str()
+        .expect("MCP list command includes text content");
+    let listed: Value = serde_json::from_str(listed_text).expect("MCP list content is JSON");
+    validate(
+        &find_by_name("list")
+            .expect("list is registered")
+            .response_schema,
+        &listed,
+    )
+    .expect("MCP list response validates");
+    journey_evidence.push((
+        coverage::command_contract(list_contract),
+        "list-command".to_string(),
+        coverage::payload_hash(&listed),
+        coverage::response_outcome(&listed).to_string(),
+    ));
+
+    let new_project_contract = find(NEW_PROJECT_COMMAND_ID).expect("new-project is registered");
     let created = client.call_tool(
         "create",
-        find(NEW_PROJECT_COMMAND_ID)
-            .expect("new-project is registered")
-            .schema_version,
+        new_project_contract.schema_version,
         json!({"destination": project.to_string_lossy()}),
     );
     let created = structured_tool_success(&created, "create");
@@ -1125,18 +1265,22 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &created,
     )
     .expect("MCP new-project response validates");
-    journey_evidence.push(("new-project".to_string(), "create".to_string()));
+    journey_evidence.push((
+        coverage::command_contract(new_project_contract),
+        "create".to_string(),
+        coverage::payload_hash(&created),
+        coverage::response_outcome(&created).to_string(),
+    ));
     let generation_id = created["generation_id"]
         .as_str()
         .expect("new-project returns a generation ID")
         .to_string();
     let initial_revision = assert_fresh_project(&project, &generation_id);
 
+    let identity_contract = find(IDENTITY_COMMAND_ID).expect("identity is registered");
     let identity = client.call_tool(
         "identity",
-        find(IDENTITY_COMMAND_ID)
-            .expect("identity is registered")
-            .schema_version,
+        identity_contract.schema_version,
         json!({"bundle_path": project.to_string_lossy()}),
     );
     let identity = structured_tool_success(&identity, "identity");
@@ -1147,7 +1291,12 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &identity,
     )
     .expect("MCP identity response validates");
-    journey_evidence.push(("identity".to_string(), "identity".to_string()));
+    journey_evidence.push((
+        coverage::command_contract(identity_contract),
+        "identity".to_string(),
+        coverage::payload_hash(&identity),
+        coverage::response_outcome(&identity).to_string(),
+    ));
     assert_eq!(identity["transaction_count"], 0, "journey starts empty");
     assert_eq!(
         identity["revision_hash"], initial_revision,
@@ -1217,7 +1366,12 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
             assert_eq!(response["operation"], command_name);
             assert_eq!(response["feature_id"], feature_id);
         }
-        journey_evidence.push((command_name.to_string(), call_id));
+        journey_evidence.push((
+            coverage::command_contract(registered),
+            call_id,
+            coverage::payload_hash(&response),
+            coverage::response_outcome(&response).to_string(),
+        ));
         revision = next_revision;
     }
 
@@ -1287,30 +1441,27 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
     );
     restarted.notify("notifications/initialized", json!({}));
 
+    let load_contract = find(LOAD_COMMAND_ID).expect("load is registered");
     let loaded = restarted.call_tool(
         "load",
-        find(LOAD_COMMAND_ID)
-            .expect("load is registered")
-            .schema_version,
+        load_contract.schema_version,
         json!({"bundle_path": project.to_string_lossy()}),
     );
     let loaded = structured_tool_success(&loaded, "load");
-    validate(
-        &find(LOAD_COMMAND_ID)
-            .expect("load is registered")
-            .response_schema,
-        &loaded,
-    )
-    .expect("MCP load response validates");
-    journey_evidence.push(("load".to_string(), "load".to_string()));
+    validate(&load_contract.response_schema, &loaded).expect("MCP load response validates");
+    journey_evidence.push((
+        coverage::command_contract(load_contract),
+        "load".to_string(),
+        coverage::payload_hash(&loaded),
+        coverage::response_outcome(&loaded).to_string(),
+    ));
     assert_eq!(loaded["revision_hash"], finished_revision);
     assert_eq!(loaded["feature_graph_hash"], finished_graph_hash);
 
+    let reloaded_identity_contract = find(IDENTITY_COMMAND_ID).expect("identity is registered");
     let reloaded_identity = restarted.call_tool(
         "identity",
-        find(IDENTITY_COMMAND_ID)
-            .expect("identity is registered")
-            .schema_version,
+        reloaded_identity_contract.schema_version,
         json!({"bundle_path": project.to_string_lossy()}),
     );
     let reloaded_identity = structured_tool_success(&reloaded_identity, "identity");
@@ -1321,7 +1472,12 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &reloaded_identity,
     )
     .expect("MCP reloaded identity response validates");
-    journey_evidence.push(("identity".to_string(), "identity".to_string()));
+    journey_evidence.push((
+        coverage::command_contract(reloaded_identity_contract),
+        "identity".to_string(),
+        coverage::payload_hash(&reloaded_identity),
+        coverage::response_outcome(&reloaded_identity).to_string(),
+    ));
     assert_eq!(
         reloaded_identity["transaction_count"], finished_transaction_count,
         "reloaded identity reports every recipe transaction"
@@ -1338,11 +1494,10 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         reloaded_identity["feature_graph_hash"]
     );
 
+    let validate_contract = find(VALIDATE_COMMAND_ID).expect("validate is registered");
     let validated = restarted.call_tool(
         "validate",
-        find(VALIDATE_COMMAND_ID)
-            .expect("validate is registered")
-            .schema_version,
+        validate_contract.schema_version,
         json!({
             "bundle_path": project.to_string_lossy(),
             "feature_id": "complete-bracket",
@@ -1356,7 +1511,12 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &validated,
     )
     .expect("MCP validate response validates");
-    journey_evidence.push(("validate".to_string(), "validate".to_string()));
+    journey_evidence.push((
+        coverage::command_contract(validate_contract),
+        "validate".to_string(),
+        coverage::payload_hash(&validated),
+        coverage::response_outcome(&validated).to_string(),
+    ));
     assert_eq!(validated["status"], "ok", "MCP validate succeeds");
     assert_eq!(
         validated["valid"], true,
@@ -1370,11 +1530,10 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         !export_root.exists(),
         "export destination stays absent before export"
     );
+    let export_contract = find(EXPORT_COMMAND_ID).expect("export is registered");
     let exported = restarted.call_tool(
         "export",
-        find(EXPORT_COMMAND_ID)
-            .expect("export is registered")
-            .schema_version,
+        export_contract.schema_version,
         json!({
             "bundle_path": project.to_string_lossy(),
             "feature_id": "complete-bracket",
@@ -1393,7 +1552,12 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &exported,
     )
     .expect("MCP export response validates");
-    journey_evidence.push(("export".to_string(), "export".to_string()));
+    journey_evidence.push((
+        coverage::command_contract(export_contract),
+        "export".to_string(),
+        coverage::payload_hash(&exported),
+        coverage::response_outcome(&exported).to_string(),
+    ));
     assert_eq!(exported["status"], "ok", "MCP export succeeds");
     assert_eq!(exported["feature_id"], "complete-bracket");
     assert_eq!(exported["source_revision_id"], finished_revision);
@@ -1441,13 +1605,12 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         .chain(second_evidence.protocol.iter())
         .collect();
     for command_name in &required_commands {
-        let (_, call_id) = journey_evidence
+        let (_, call_id, _, _) = journey_evidence
             .iter()
-            .find(|(recorded, _)| recorded == command_name)
+            .find(|(recorded, _, _, _)| recorded.command_name == *command_name)
             .unwrap_or_else(|| panic!("journey evidence omits required command {command_name}"));
         assert_correlated_structured_ok(&chained_protocol, call_id, command_name);
     }
-
     if let Some(run_id) = configured_run_id() {
         let source = current_source_identity().expect("application source identity is available");
         let worker = OcctWorker::locate()
@@ -1512,4 +1675,5 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         publish_journey_evidence_report(&evidence_root(), report, &stl_path)
             .expect("MCP journey evidence publishes for equivalence");
     }
+    write_common_coverage_report(&journey_evidence, &tools, &first_evidence, &second_evidence);
 }

@@ -3,6 +3,9 @@
 mod launch;
 
 use std::collections::BTreeSet;
+use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -17,11 +20,14 @@ use threeterm_host::{
     stale_last_valid_geometry_for_export,
 };
 use threeterm_protocol::command_execution::ExecutionError;
+use threeterm_protocol::coverage;
 use threeterm_protocol::schema::{
     CommandId, EXPORT_COMMAND_ID, LIST_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID,
     REATTACH_EDGE_COMMAND_ID, REDO_COMMAND_ID, RESTORE_REVISION_COMMAND_ID, SAVE_COMMAND_ID,
-    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID, VALIDATE_COMMAND_ID,
+    SKETCH_SOLVE_COMMAND_ID, TIMELINE_COMMAND_ID, UNDO_COMMAND_ID, VALIDATE_COMMAND_ID, find,
+    registry_hash,
 };
+use threeterm_protocol::schema_validator::validate;
 use threeterm_theme::{
     NonColorMarker, SemanticToken, ThemeContext, TransientState, default_dark, transient_visuals,
 };
@@ -245,8 +251,61 @@ impl CommandGateway for HostCommandGateway<'_> {
     }
 
     fn commit(&self, command: CommandId, request: Value) -> Result<Value, String> {
-        execute_domain_command(self.host, command, request).map_err(|error| format!("{error:?}"))
+        let response = execute_domain_command(self.host, command, request)
+            .map_err(|error| format!("{error:?}"))?;
+        let contract = find(command).ok_or_else(|| format!("unknown command {}", command.0))?;
+        validate(&contract.response_schema, &response)
+            .map_err(|error| format!("response schema validation failed: {error}"))?;
+        Ok(response)
     }
+}
+
+fn write_tool_coverage_marker(command: CommandId, response: &Value, outcome: &str) -> String {
+    let contract = find(command).expect("committed TUI command is registered");
+    let advertised = if command == LIST_COMMAND_ID {
+        response.clone()
+    } else {
+        Value::Null
+    };
+    let marker = json!({
+        "command_id": contract.id.0,
+        "command_name": contract.name,
+        "command_schema_version": contract.schema_version,
+        "request_schema_version": contract.request_schema_version,
+        "response_schema_version": contract.response_schema_version,
+        "request_schema_hash": coverage::schema_hash(&contract.request_schema),
+        "response_schema_hash": coverage::schema_hash(&contract.response_schema),
+        "response_payload_hash": coverage::payload_hash(response),
+        "outcome": outcome,
+        "registry_hash": registry_hash(),
+        "adapter_exposure": advertised,
+    });
+    let mut log_outcome = outcome;
+    if let Some(path) = env::var_os("THREETERM_COVERAGE_EXECUTION_LOG") {
+        let write_result = (|| -> std::io::Result<()> {
+            if let Some(parent) = Path::new(&path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{marker}")
+        })();
+        if write_result.is_err() {
+            log_outcome = "coverage-write-failed";
+        }
+    }
+    format!(
+        "[tool-coverage] command={} outcome={log_outcome}",
+        command.0
+    )
+}
+
+fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
+    write_tool_coverage_marker(command, response, coverage::response_outcome(response))
+}
+
+fn tool_coverage_failure_marker(command: CommandId, error: &str) {
+    let response = json!({"error": error});
+    let _ = write_tool_coverage_marker(command, &response, "failed");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4332,7 +4391,10 @@ impl<R: Renderer> TuiViewportSession<R> {
         };
         let response = match gateway.commit(command, request) {
             Ok(response) => response,
-            Err(error) => return self.reject_commit(host, root, format!("{error:?}")),
+            Err(error) => {
+                tool_coverage_failure_marker(command, &error);
+                return self.reject_commit(host, root, format!("{error:?}"));
+            }
         };
         if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID {
             if response["status"] == "invalid_request" {
@@ -4384,8 +4446,9 @@ impl<R: Renderer> TuiViewportSession<R> {
                 .collect::<Vec<_>>()
                 .join(",");
             let overlay = format!(
-                "[selection-glyph] Commit: list revision={revision} commands={} ids={ids}",
+                "[selection-glyph] Commit: list revision={revision} commands={} ids={ids}\n{}",
                 commands.len(),
+                tool_coverage_marker(command, &response),
             );
             self.record_action(
                 "committed",
@@ -4454,56 +4517,60 @@ impl<R: Renderer> TuiViewportSession<R> {
         }
         let submission = self.render_current().map_err(TuiViewportError::Viewport)?;
         let committed_scene = true;
-        let overlay = if command == NEW_PROJECT_COMMAND_ID {
-            let project_root = active_project_root
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
-            format!(
-                "[selection-glyph] Project created: {} generation_id={} transaction_count={} revision={revision}",
-                project_root,
-                response
-                    .get("generation_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown"),
-                response["manifest"]["transaction_count"]
-                    .as_u64()
-                    .unwrap_or_default()
-            )
-        } else if command == SAVE_COMMAND_ID {
-            format!(
-                "[selection-glyph] Commit: save\n[selection-glyph] Save completed: feature_id={} revision={revision}",
-                request_feature_id
-            )
-        } else if command == LOAD_COMMAND_ID {
-            format!("[selection-glyph] Load completed: revision={revision}")
-        } else if command == VALIDATE_COMMAND_ID {
-            format!(
-                "[validation-status] Validation passed: feature_id={} revision={revision}",
-                response["feature_id"].as_str().unwrap_or("unknown")
-            )
-        } else if command == EXPORT_COMMAND_ID {
-            format!(
-                "[export-status] Export completed: feature_id={} status={} artifacts={}",
-                response["feature_id"].as_str().unwrap_or("unknown"),
-                response["status"].as_str().unwrap_or("unknown"),
-                response["artifacts"]
-            )
-        } else {
-            let measurements = ["material_volume", "removed_volume"]
-                .into_iter()
-                .filter_map(|field| {
+        let overlay = format!(
+            "{}\n{}",
+            if command == NEW_PROJECT_COMMAND_ID {
+                let project_root = active_project_root
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                format!(
+                    "[selection-glyph] Project created: {} generation_id={} transaction_count={} revision={revision}",
+                    project_root,
                     response
-                        .get(field)
-                        .and_then(Value::as_f64)
-                        .map(|value| format!(" {field}={value}"))
-                })
-                .collect::<String>();
-            format!(
-                "[selection-glyph] Commit: {} revision={revision}{measurements}",
-                command.0,
-            )
-        };
+                        .get("generation_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown"),
+                    response["manifest"]["transaction_count"]
+                        .as_u64()
+                        .unwrap_or_default()
+                )
+            } else if command == SAVE_COMMAND_ID {
+                format!(
+                    "[selection-glyph] Commit: save\n[selection-glyph] Save completed: feature_id={} revision={revision}",
+                    request_feature_id
+                )
+            } else if command == LOAD_COMMAND_ID {
+                format!("[selection-glyph] Load completed: revision={revision}")
+            } else if command == VALIDATE_COMMAND_ID {
+                format!(
+                    "[validation-status] Validation passed: feature_id={} revision={revision}",
+                    response["feature_id"].as_str().unwrap_or("unknown")
+                )
+            } else if command == EXPORT_COMMAND_ID {
+                format!(
+                    "[export-status] Export completed: feature_id={} status={} artifacts={}",
+                    response["feature_id"].as_str().unwrap_or("unknown"),
+                    response["status"].as_str().unwrap_or("unknown"),
+                    response["artifacts"]
+                )
+            } else {
+                let measurements = ["material_volume", "removed_volume"]
+                    .into_iter()
+                    .filter_map(|field| {
+                        response
+                            .get(field)
+                            .and_then(Value::as_f64)
+                            .map(|value| format!(" {field}={value}"))
+                    })
+                    .collect::<String>();
+                format!(
+                    "[selection-glyph] Commit: {} revision={revision}{measurements}",
+                    command.0,
+                )
+            },
+            tool_coverage_marker(command, &response),
+        );
         self.record_action(
             "committed",
             command.0,

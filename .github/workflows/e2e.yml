@@ -26,6 +26,7 @@ jobs:
       PODMAN_ROOTLESS: "1"
       THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
       THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS: "3600"
+      THREETERM_COVERAGE_EVIDENCE_ROOT: target/acceptance-run/journey-coverage
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,6 +60,7 @@ jobs:
               -w /workspace \
               -e "THREETERM_EXPECTED_ACCEPTANCE_RESULT=${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
               -e "THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS=${THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS}" \
+              -e "THREETERM_COVERAGE_EVIDENCE_ROOT=${THREETERM_COVERAGE_EVIDENCE_ROOT}" \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
               bash -lc '
                 set -euo pipefail
@@ -100,19 +102,21 @@ jobs:
             .schema_version == "threeterm.acceptance.catalog/1" and
             .source.commit == $commit and
             .source.changed_during_run == false and
-            .evidence.complete == true and
+            (.evidence.complete == true or
+              ($expected_result == "failed" and
+               any(.gates[]; .id == "coverage.all-surfaces" and .status == "failed"))) and
             .result == $expected_result and
             ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
               "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
               "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
-              "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
+              "coverage.all-surfaces", "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
               "replay.reattach-edge", "reliability.failure-drill", "registry.command-schemas",
               "schema.identities", "licensing.libslvs", "release.namespace",
               "documentation.workspace", "performance.claims"]) and
             (if $expected_result == "passed" then
                (.gates | all(.status == "passed" and .timed_out == false))
              else
-               (.gates | all(if .id == "release.namespace" then
+               (.gates | all(if .id == "release.namespace" or .id == "coverage.all-surfaces" then
                               .status == "failed" and .timed_out == false
                             else
                               .status == "passed" and .timed_out == false
@@ -133,7 +137,7 @@ jobs:
             target/acceptance-run/logs
             target/acceptance-run/native-worker-manifest.json
             target/acceptance-run/occt-geometry-smoke/real-occt-geometry-smoke.json
-            target/acceptance-run/api-journey-coverage/api-journey-coverage.json
+            target/acceptance-run/journey-coverage
             target/acceptance-run/reliability-failure-drill
             target/acceptance-run/libslvs-artifact
           if-no-files-found: error

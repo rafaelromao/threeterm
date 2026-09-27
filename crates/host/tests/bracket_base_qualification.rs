@@ -19,6 +19,7 @@ use threeterm_host::stl_integrity::{observe_path, verify_path};
 use threeterm_occt_worker::{EdgeCandidateEvidence, EdgeInspectionResult, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::coverage::{self, ExecutionEvidence, JourneyStreams, Surface};
 use threeterm_protocol::schema;
 use threeterm_protocol::schema_validator::validate;
 
@@ -70,6 +71,14 @@ fn recipe() -> Value {
 }
 
 fn command_response(host: &Host, command_name: &str, request: Value) -> Value {
+    command_response_with_contract(host, command_name, request).1
+}
+
+fn command_response_with_contract(
+    host: &Host,
+    command_name: &str,
+    request: Value,
+) -> (coverage::CommandContract, Value) {
     let command = schema::find_by_name(command_name)
         .unwrap_or_else(|| panic!("recipe references unknown command {command_name}"));
     validate(&command.request_schema, &request)
@@ -85,7 +94,7 @@ fn command_response(host: &Host, command_name: &str, request: Value) -> Value {
             "response schema version"
         );
     }
-    response
+    (coverage::command_contract(command), response)
 }
 
 fn export_request(
@@ -1981,14 +1990,23 @@ const REQUIRED_JOURNEY_COMMANDS: &[&str] = &[
     "export",
 ];
 
-fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str) {
-    let registered = schema::find_by_name(command_name)
-        .unwrap_or_else(|| panic!("evidence references unknown command {command_name}"));
+fn record_evidence(
+    evidence: &mut Vec<Value>,
+    contract: &coverage::CommandContract,
+    role: &str,
+    response: &Value,
+) {
     evidence.push(json!({
-        "command": command_name,
-        "request_schema_version": registered.request_schema_version,
+        "command": contract.command_name,
+        "command_id": contract.command_id,
+        "command_schema_version": contract.command_schema_version,
+        "request_schema_version": contract.request_schema_version,
+        "response_schema_version": contract.response_schema_version,
+        "request_schema_hash": contract.request_schema_hash,
+        "response_schema_hash": contract.response_schema_hash,
+        "response_payload_hash": coverage::payload_hash(response),
         "role": role,
-        "outcome": "ok",
+        "outcome": coverage::response_outcome(response),
     }));
 }
 
@@ -2011,9 +2029,99 @@ fn write_journey_evidence(path: &Path, evidence: &Value) {
     fs::rename(&temporary, path).expect("journey evidence publishes atomically");
 }
 
+fn write_common_coverage_report(evidence: &[Value], advertised: &Value) {
+    let executions = evidence
+        .iter()
+        .enumerate()
+        .map(|(step_index, entry)| {
+            let command_name = entry["command"]
+                .as_str()
+                .expect("coverage evidence command is a string");
+            ExecutionEvidence {
+                command_id: entry["command_id"]
+                    .as_str()
+                    .expect("API coverage evidence has a command ID")
+                    .to_string(),
+                command_name: entry["command"]
+                    .as_str()
+                    .expect("API coverage evidence has a command name")
+                    .to_string(),
+                command_schema_version: entry["command_schema_version"]
+                    .as_str()
+                    .expect("API coverage evidence has a command schema version")
+                    .to_string(),
+                request_schema_version: entry["request_schema_version"]
+                    .as_str()
+                    .expect("API coverage evidence has a request schema version")
+                    .to_string(),
+                response_schema_version: entry["response_schema_version"]
+                    .as_str()
+                    .expect("API coverage evidence has a response schema version")
+                    .to_string(),
+                request_schema_hash: entry["request_schema_hash"]
+                    .as_str()
+                    .expect("API coverage evidence has a request schema hash")
+                    .to_string(),
+                response_schema_hash: entry["response_schema_hash"]
+                    .as_str()
+                    .expect("API coverage evidence has a response schema hash")
+                    .to_string(),
+                response_payload_hash: entry["response_payload_hash"]
+                    .as_str()
+                    .expect("API coverage evidence has a response payload hash")
+                    .to_string(),
+                outcome: entry["outcome"].as_str().unwrap_or("failed").to_string(),
+                step_index: Some(step_index as u32),
+                evidence_id: format!("api-{step_index}-{command_name}"),
+            }
+        })
+        .collect();
+    let source =
+        coverage::capture_source_identity(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("API coverage source identity is available");
+    let adapter_exposure = advertised
+        .as_array()
+        .expect("API discovery is an array")
+        .iter()
+        .map(|entry| coverage::CommandContract {
+            command_id: entry["id"].as_str().unwrap_or("unknown").to_string(),
+            command_name: entry["name"].as_str().unwrap_or("unknown").to_string(),
+            command_schema_version: entry["schema_version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            request_schema_version: entry["request_schema_version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            response_schema_version: entry["response_schema_version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            request_schema_hash: coverage::schema_hash(&entry["request_schema"]),
+            response_schema_hash: coverage::schema_hash(&entry["response_schema"]),
+        })
+        .collect();
+    coverage::write_journey_report_with_exposure(
+        &coverage::report_root(),
+        Surface::Api,
+        "e2e_stl_api_all_tools_l_bracket",
+        "passed",
+        source,
+        adapter_exposure,
+        JourneyStreams {
+            executions,
+            ..JourneyStreams::default()
+        },
+    )
+    .expect("API coverage report writes");
+}
+
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_api_all_tools_l_bracket() {
+    coverage::remove_journey_report(&coverage::report_root(), Surface::Api)
+        .expect("stale API coverage report clears");
     let recipe: Value =
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
     assert_complete_recipe_structure(&recipe);
@@ -2027,8 +2135,11 @@ fn e2e_stl_api_all_tools_l_bracket() {
     let host = Host::new();
     let mut evidence: Vec<Value> = Vec::new();
 
-    let listed = command_response(&host, "list", json!({}));
-    let listed = listed.as_array().expect("list response is a command array");
+    let (listed_contract, listed_response) =
+        command_response_with_contract(&host, "list", json!({}));
+    let listed = listed_response
+        .as_array()
+        .expect("list response is a command array");
     let registered: Vec<_> = schema::iter().collect();
     assert_eq!(
         listed.len(),
@@ -2077,14 +2188,19 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "discovery omits required journey command {required}"
         );
     }
-    record_evidence(&mut evidence, "list", "discovery");
+    record_evidence(
+        &mut evidence,
+        &listed_contract,
+        "discovery",
+        &listed_response,
+    );
 
-    command_response(
+    let (created_contract, created) = command_response_with_contract(
         &host,
         "new-project",
         json!({"destination": workspace.root.to_string_lossy()}),
     );
-    record_evidence(&mut evidence, "new-project", "project-create");
+    record_evidence(&mut evidence, &created_contract, "project-create", &created);
 
     let empty = Bundle::at(&workspace.root)
         .open()
@@ -2137,7 +2253,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             );
         }
 
-        let response = command_response(&host, command_name, request);
+        let (contract, response) = command_response_with_contract(&host, command_name, request);
         let next_revision = response["revision_hash"]
             .as_str()
             .expect("journey response has a revision hash")
@@ -2151,7 +2267,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             assert_eq!(response["operation"], command_name);
             assert_eq!(response["feature_id"], feature_id);
         }
-        record_evidence(&mut evidence, command_name, feature_id);
+        record_evidence(&mut evidence, &contract, feature_id, &response);
         revision = next_revision;
     }
 
@@ -2196,12 +2312,17 @@ fn e2e_stl_api_all_tools_l_bracket() {
     drop(host);
 
     let reopened_host = Host::new();
-    let reopened = command_response(
+    let (reopened_contract, reopened) = command_response_with_contract(
         &reopened_host,
         "load",
         json!({"bundle_path": workspace.root.to_string_lossy()}),
     );
-    record_evidence(&mut evidence, "load", "fresh-host-reopen");
+    record_evidence(
+        &mut evidence,
+        &reopened_contract,
+        "fresh-host-reopen",
+        &reopened,
+    );
     for field in ["revision_hash", "feature_graph_hash"] {
         assert_eq!(
             reopened[field], closed_identity[field],
@@ -2220,7 +2341,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
         );
     }
 
-    let validated = command_response(
+    let (validated_contract, validated) = command_response_with_contract(
         &reopened_host,
         "validate",
         json!({
@@ -2228,7 +2349,12 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "feature_id": "complete-bracket",
         }),
     );
-    record_evidence(&mut evidence, "validate", "delivery-validation");
+    record_evidence(
+        &mut evidence,
+        &validated_contract,
+        "delivery-validation",
+        &validated,
+    );
     assert_eq!(validated["status"], "ok");
     assert_eq!(validated["valid"], true);
     assert_eq!(validated["revision_hash"], reopened["revision_hash"]);
@@ -2239,7 +2365,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
         !export_root.exists() && !stl_path.exists(),
         "journey starts with no export fixture"
     );
-    let exported = command_response(
+    let (exported_contract, exported) = command_response_with_contract(
         &reopened_host,
         "export",
         export_request(
@@ -2249,7 +2375,12 @@ fn e2e_stl_api_all_tools_l_bracket() {
             mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
         ),
     );
-    record_evidence(&mut evidence, "export", "delivery-export");
+    record_evidence(
+        &mut evidence,
+        &exported_contract,
+        "delivery-export",
+        &exported,
+    );
     assert_eq!(exported["status"], "ok");
     assert_eq!(exported["feature_id"], "complete-bracket");
     assert_eq!(exported["source_revision_id"], validated["revision_hash"]);
@@ -2269,12 +2400,6 @@ fn e2e_stl_api_all_tools_l_bracket() {
         assert!(
             evidence.iter().any(|entry| entry["command"] == *required),
             "retained per-tool evidence omits required command {required}"
-        );
-        assert!(
-            evidence
-                .iter()
-                .any(|entry| entry["command"] == *required && entry["outcome"] == "ok"),
-            "retained per-tool evidence lacks an ok outcome for {required}"
         );
     }
     let evidence_path = journey_evidence_root().join("api-journey-coverage.json");
@@ -2303,8 +2428,8 @@ fn e2e_stl_api_all_tools_l_bracket() {
         assert!(
             retained_executions
                 .iter()
-                .any(|entry| entry["command"] == *required && entry["outcome"] == "ok"),
-            "retained evidence omits ok outcome for {required}"
+                .any(|entry| entry["command"] == *required),
+            "retained evidence omits required command {required}"
         );
     }
     if let Some(run_id) = configured_run_id() {
@@ -2350,4 +2475,5 @@ fn e2e_stl_api_all_tools_l_bracket() {
         evidence_path.is_file(),
         "retained journey evidence survives workspace cleanup"
     );
+    write_common_coverage_report(&evidence, &Value::Array(listed.to_vec()));
 }

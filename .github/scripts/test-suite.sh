@@ -37,7 +37,8 @@ case "${1:-}" in
                 --skip production_tui_mirror_pattern_reinforcing_features \
                 --skip production_tui_tapered_lofted_reinforcements \
                 --skip production_tui_bracket_foundation \
-                --skip production_tui_all_tools_stl_journey --test-threads=1
+                --skip production_tui_all_tools_stl_journey \
+                --skip all_surfaces_tool_coverage_matrix --test-threads=1
         ;;
     e2e)
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
@@ -48,7 +49,8 @@ case "${1:-}" in
                 --skip production_tui_mirror_pattern_reinforcing_features \
                 --skip production_tui_tapered_lofted_reinforcements \
                 --skip production_tui_bracket_foundation \
-                --skip production_tui_all_tools_stl_journey --test-threads=1
+                --skip production_tui_all_tools_stl_journey \
+                --skip all_surfaces_tool_coverage_matrix --test-threads=1
         ;;
     graphical)
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \

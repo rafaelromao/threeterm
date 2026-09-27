@@ -61,6 +61,7 @@ BRACKET_STEPS_DIR=''
 ALL_TOOLS_TRANSCRIPT=''
 ALL_TOOLS_STEPS_DIR=''
 ALL_TOOLS_DISCOVERY=''
+TOOL_COVERAGE_LOG=''
 DISCOVERY_SCREENSHOT=''
 ALL_TOOLS_CANCEL_REVISION=''
 PROJECT_CREATED_SCREENSHOT=''
@@ -473,6 +474,12 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         PROJECT_ROOT=''
     fi
 elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+    coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
+    TOOL_COVERAGE_LOG="${coverage_root}/tool-coverage.jsonl"
+    mkdir -p "$coverage_root"
+    rm -f -- "$coverage_root/tui-journey-coverage.json" \
+        "$coverage_root/journey-coverage-matrix.json" \
+        "$TOOL_COVERAGE_LOG"
     project_parent=''
     if project_parent="$(cd "$(dirname "$PROJECT_ROOT")" 2>/dev/null && pwd)"; then
         PROJECT_ROOT="${project_parent}/$(basename "$PROJECT_ROOT")"
@@ -593,8 +600,18 @@ STIMULUS_ERROR="${EVIDENCE_ROOT}/probe-stimulus-error.txt"
 XDG_RUNTIME_DIR="${EVIDENCE_ROOT}/runtime"
 WAYLAND_DISPLAY="threeterm-${BASHPID}.wayland"
 export LC_ALL LANG XDG_RUNTIME_DIR WAYLAND_DISPLAY
+if [[ -n "$TOOL_COVERAGE_LOG" ]]; then
+    export THREETERM_COVERAGE_EXECUTION_LOG="$TOOL_COVERAGE_LOG"
+else
+    unset THREETERM_COVERAGE_EXECUTION_LOG
+fi
 
-if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
+if [[ -n "${THREETERM_SOURCE_COMMIT:-}" || -n "${THREETERM_SOURCE_DIRTY:-}" ]]; then
+    [[ -n "${THREETERM_SOURCE_COMMIT:-}" && -n "${THREETERM_SOURCE_DIRTY:-}" ]] ||
+        die source_identity_incomplete 'THREETERM_SOURCE_COMMIT and THREETERM_SOURCE_DIRTY must be supplied together'
+    source_commit="$THREETERM_SOURCE_COMMIT"
+    source_dirty="$THREETERM_SOURCE_DIRTY"
+elif git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
     source_commit="$(git -C "$ROOT" rev-parse HEAD)"
     if git -C "$ROOT" diff --quiet && git -C "$ROOT" diff --cached --quiet; then
         source_dirty=false
@@ -602,6 +619,8 @@ if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
         source_dirty=true
     fi
 fi
+export THREETERM_SOURCE_COMMIT="$source_commit"
+export THREETERM_SOURCE_DIRTY="$source_dirty"
 
 json_escape_minimal() {
     local value="$1"
@@ -2389,6 +2408,7 @@ write_manifest() {
     local final_status="$1"
     local artifacts='[]'
     local kind path bytes digest record
+    local coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
     local -a evidence_files=(
         "$PTY_OUTPUT" "$PTY_INPUT" "$TUI_STDERR" "$WESTON_LOG" "$TOOL_VERSIONS"
         "$STARTUP_SCREENSHOT" "$PROJECT_CREATED_SCREENSHOT" "$EXTRUSION_COMMITTED_SCREENSHOT"
@@ -2415,6 +2435,10 @@ write_manifest() {
         cleanup_screenshot failure_screenshot
         orbit_difference window_screenshot probe_stimulus_error
     )
+    if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+        evidence_files+=("${coverage_root}/tui-journey-coverage.json")
+        evidence_kinds+=(tui_journey_coverage_report)
+    fi
     if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         evidence_files+=(
             "$PROJECT_IDENTITY"
@@ -2450,6 +2474,7 @@ write_manifest() {
     if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
         evidence_files+=(
             "$ALL_TOOLS_TRANSCRIPT" "$ALL_TOOLS_DISCOVERY" "$DISCOVERY_SCREENSHOT"
+            "$TOOL_COVERAGE_LOG"
             "$SAVE_SCREENSHOT" "$REOPEN_SCREENSHOT"
             "$VALIDATION_SCREENSHOT" "$EXPORT_SCREENSHOT" "$SELECTION_SCREENSHOT"
             "$ORBIT_SCREENSHOT" "$STL_INTEGRITY_EVIDENCE" "$STL_PATH"
@@ -2457,6 +2482,7 @@ write_manifest() {
         )
         evidence_kinds+=(
             all_tools_transcript all_tools_discovery discovery_screenshot
+            tool_coverage_log
             save_screenshot reopen_screenshot
             validation_screenshot export_screenshot selection_screenshot
             orbit_screenshot stl_integrity exported_stl first_tui_status second_tui_status
@@ -2559,6 +2585,44 @@ write_manifest() {
     fi
 }
 
+write_common_coverage_report() {
+    [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]] || return 0
+    if grep -aFq 'outcome=coverage-write-failed' "$PTY_OUTPUT" 2>/dev/null; then
+        failure_code='coverage_log_write_failed'
+        failure_detail='the TUI could not retain one or more tool coverage records'
+        return 1
+    fi
+    local coverage_binary="${THREETERM_COVERAGE_BINARY:-}"
+    if [[ -z "$coverage_binary" ]]; then
+        local target_root="${CARGO_TARGET_DIR:-${ROOT}/target}"
+        for coverage_binary in \
+            "$target_root/debug/threeterm-coverage" \
+            "$target_root/debug/deps/threeterm-coverage"*; do
+            [[ -x "$coverage_binary" ]] && break
+        done
+    fi
+    [[ -x "$coverage_binary" ]] || {
+        [[ "$success" == 1 ]] && {
+            failure_code='coverage_utility_unavailable'
+            failure_detail='workspace coverage utility is not executable'
+        }
+        return 1
+    }
+    [[ -f "$MANIFEST" && -f "$ALL_TOOLS_TRANSCRIPT" && -f "$ALL_TOOLS_DISCOVERY" && -f "$TOOL_COVERAGE_LOG" ]] || {
+        [[ "$success" == 1 ]] && {
+            failure_code='coverage_evidence_incomplete'
+            failure_detail='the all-tools journey did not retain every coverage input'
+        }
+        return 1
+    }
+    local coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
+    mkdir -p "$coverage_root" || return 1
+    "$coverage_binary" tui-report \
+        "$MANIFEST" "$ALL_TOOLS_TRANSCRIPT" "$ALL_TOOLS_DISCOVERY" \
+        "$TOOL_COVERAGE_LOG" \
+        "${coverage_root}/tui-journey-coverage.json"
+}
+
 on_exit() {
     local final_status=$?
     trap - EXIT INT TERM
@@ -2583,6 +2647,15 @@ on_exit() {
         final_status=1
         failure_code='transient_identity_redaction_failed'
         failure_detail='transient source revision could not be removed from retained evidence'
+    fi
+    write_manifest "$final_status"
+    if ! write_common_coverage_report; then
+        if [[ "$success" == 1 && "$final_status" == 0 ]]; then
+            success=0
+            final_status=1
+            failure_code='coverage_report_unavailable'
+            failure_detail='the common TUI journey report could not be retained'
+        fi
     fi
     write_manifest "$final_status"
     exit "$final_status"

@@ -36,6 +36,7 @@ type StreamLine = Result<Vec<u8>, String>;
 #[derive(Debug)]
 struct McpEvidence {
     protocol: Vec<Value>,
+    transport: Vec<RawTransportMethod>,
     protocol_errors: Vec<Value>,
     server_diagnostics: String,
     domain_errors: Vec<Value>,
@@ -48,6 +49,7 @@ struct McpProcess {
     stdout_thread: Option<JoinHandle<()>>,
     stderr_thread: Option<JoinHandle<Result<Vec<u8>, String>>>,
     protocol: Vec<Value>,
+    transport: Vec<RawTransportMethod>,
     pending: BTreeMap<String, Value>,
     protocol_errors: Vec<Value>,
     domain_errors: Vec<Value>,
@@ -109,6 +111,7 @@ impl McpProcess {
             stdout_thread: Some(stdout_thread),
             stderr_thread: Some(stderr_thread),
             protocol: Vec::new(),
+            transport: Vec::new(),
             pending: BTreeMap::new(),
             protocol_errors: Vec::new(),
             domain_errors: Vec::new(),
@@ -116,6 +119,24 @@ impl McpProcess {
     }
 
     fn send(&mut self, request: &Value) {
+        let method = request["method"]
+            .as_str()
+            .expect("MCP transport request has a method")
+            .to_string();
+        let id = request
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        self.transport.push(RawTransportMethod {
+            direction: if id.is_some() {
+                "request".to_string()
+            } else {
+                "notification".to_string()
+            },
+            method,
+            correlation_id: id.clone(),
+            id,
+        });
         let mut bytes = serde_json::to_vec(request).expect("MCP request serializes");
         bytes.push(b'\n');
         let stdin = self.stdin.as_mut().expect("MCP stdin remains open");
@@ -238,6 +259,7 @@ impl McpProcess {
 
         McpEvidence {
             protocol: std::mem::take(&mut self.protocol),
+            transport: std::mem::take(&mut self.transport),
             protocol_errors: std::mem::take(&mut self.protocol_errors),
             server_diagnostics: String::from_utf8_lossy(&stderr).into_owned(),
             domain_errors: std::mem::take(&mut self.domain_errors),
@@ -443,6 +465,8 @@ fn advertised_contracts(tools: &[Value]) -> Vec<CommandContract> {
                 .expect("advertised MCP tool name is a string");
             let input_schema = &tool["inputSchema"];
             let output_schema = &tool["outputSchema"];
+            // MCP uses the registered schema version as the wire tool name;
+            // request IDs such as "create" are transport correlations only.
             if let Some(registered) = iter().find(|entry| entry.schema_version == advertised_name) {
                 CommandContract {
                     command_id: registered.id.0.to_string(),
@@ -493,34 +517,12 @@ fn write_common_coverage_report(
             },
         )
         .collect();
-    let mut raw_transport_methods = vec![
-        RawTransportMethod {
-            direction: "request".to_string(),
-            method: "initialize".to_string(),
-            id: Some("initialize".to_string()),
-            correlation_id: None,
-        },
-        RawTransportMethod {
-            direction: "notification".to_string(),
-            method: "notifications/initialized".to_string(),
-            id: None,
-            correlation_id: None,
-        },
-        RawTransportMethod {
-            direction: "request".to_string(),
-            method: "tools/list".to_string(),
-            id: Some("tools-list".to_string()),
-            correlation_id: None,
-        },
-    ];
-    raw_transport_methods.extend(journey_evidence.iter().map(|(_, call_id, _)| {
-        RawTransportMethod {
-            direction: "request".to_string(),
-            method: "tools/call".to_string(),
-            id: Some(call_id.clone()),
-            correlation_id: Some(call_id.clone()),
-        }
-    }));
+    let raw_transport_methods = first
+        .transport
+        .iter()
+        .chain(second.transport.iter())
+        .cloned()
+        .collect();
     let source =
         coverage::capture_source_identity(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
             .expect("MCP coverage source identity is available");

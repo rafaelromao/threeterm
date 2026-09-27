@@ -95,7 +95,7 @@ jobs:
   tui:
     name: Qualified graphical TUI journey
     needs: headless
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, threeterm-graphical]
     timeout-minutes: 60
     steps:
@@ -113,12 +113,18 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target
-          if [[ -f target/three-journey-headless.tar ]]; then
-            tar -xzf target/three-journey-headless.tar -C target
-          fi
           root="${THREETERM_THREE_JOURNEY_ROOT}"
+          mkdir -p "${root}/process"
           status=0
-          if [[ -x "${root}/worker-bundle/occt-worker" && -x "${root}/worker-bundle/slvs-worker" ]]; then
+          archive_status=0
+          if [[ -f target/three-journey-headless.tar ]] && ! tar -xzf target/three-journey-headless.tar -C target; then
+            archive_status=1
+            printf '%s\n' 'headless worker archive could not be extracted' >"${root}/process/tui-archive.stderr"
+          fi
+          if [[ "${archive_status}" -ne 0 ]]; then
+            bash .github/scripts/three-journey-gate.sh --synthesize tui failed \
+              'headless worker archive could not be extracted' || status=$?
+          elif [[ -x "${root}/worker-bundle/occt-worker" && -x "${root}/worker-bundle/slvs-worker" ]]; then
             export THREETERM_OCCTBUILD_WORKER="${root}/worker-bundle/occt-worker"
             export THREETERM_SLVSBUILD_WORKER="${root}/worker-bundle/slvs-worker"
             export THREETERM_OCCT_DIR="${root}/worker-bundle/prefixes/occt"
@@ -192,12 +198,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target
+          root="${THREETERM_THREE_JOURNEY_ROOT}"
+          mkdir -p "${root}/process"
+          archive_status=0
           for archive in target/three-journey-headless.tar target/three-journey-tui.tar; do
-            if [[ -f "${archive}" ]]; then
-              tar -xzf "${archive}" -C target
+            if [[ -f "${archive}" ]] && ! tar -xzf "${archive}" -C target; then
+              archive_status=1
+              printf 'unable to extract %s\n' "${archive}" >>"${root}/process/archive.stderr"
             fi
           done
-          root="${THREETERM_THREE_JOURNEY_ROOT}"
           mkdir -p "${root}/attempts"
           headless_result='${{ needs.headless.result }}'
           tui_result="$(<target/tui-job-status)"

@@ -4,9 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATE="${ROOT}/.github/scripts/three-journey-gate.sh"
 RUN_ROOT="${ROOT}/target/three-journey-gate-contract"
+MISSING_MANIFEST_ROOT="${ROOT}/target/three-journey-gate-missing-manifest"
 
-trap 'rm -rf "${RUN_ROOT}"' EXIT
-rm -rf "${RUN_ROOT}"
+trap 'rm -rf "${RUN_ROOT}" "${MISSING_MANIFEST_ROOT}"' EXIT
+rm -rf "${RUN_ROOT}" "${MISSING_MANIFEST_ROOT}"
 mkdir -p "${RUN_ROOT}"
 
 bash -n "${GATE}"
@@ -35,6 +36,8 @@ for required in \
 done
 
 set +e
+mkdir -p "${RUN_ROOT}/process"
+: >"${RUN_ROOT}/process/tui.stderr.timeout"
 THREETERM_THREE_JOURNEY_ROOT="${RUN_ROOT}" \
 THREETERM_JOURNEY_RUN_ID=contract-run \
 THREETERM_THREE_JOURNEY_SKIP_NATIVE=true \
@@ -42,6 +45,7 @@ THREETERM_THREE_JOURNEY_SKIP_NATIVE=true \
 status=$?
 set -e
 ((status != 0))
+[[ ! -e "${RUN_ROOT}/process/tui.stderr.timeout" ]]
 jq -e '
     .schema_version == "threeterm.acceptance.attempt/1" and
     .run_id == "contract-run" and
@@ -75,5 +79,18 @@ jq -e '
     (.journeys | length == 3) and
     any(.errors[]; contains("api") or contains("mcp") or contains("tui"))
 ' "${RUN_ROOT}/catalog.json" >/dev/null
+
+set +e
+THREETERM_THREE_JOURNEY_ROOT="${MISSING_MANIFEST_ROOT}" \
+THREETERM_JOURNEY_RUN_ID=missing-manifest-run \
+    bash "${GATE}" --aggregate >"${MISSING_MANIFEST_ROOT}.stdout" 2>"${MISSING_MANIFEST_ROOT}.stderr"
+missing_manifest_status=$?
+set -e
+((missing_manifest_status != 0))
+jq -e '
+    .schema_version == "threeterm.acceptance.three-journey/1" and
+    .result == "failed" and
+    any(.errors[]; contains("attempt") or contains("coverage") or contains("geometric"))
+' "${MISSING_MANIFEST_ROOT}/catalog.json" >/dev/null
 
 printf '%s\n' 'three-journey gate contract satisfied'

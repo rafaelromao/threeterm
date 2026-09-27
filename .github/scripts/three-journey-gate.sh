@@ -140,8 +140,7 @@ write_manifest() {
         return 0
     fi
     if [[ "${MODE}" == aggregate || "${MODE}" == synthesize ]]; then
-        printf '%s\n' 'aggregate input is missing its producer-created run manifest' >&2
-        return 1
+        printf '%s\n' 'producer-created run manifest is missing; rebuilding source-bound aggregate input' >&2
     fi
     local commit dirty canonical raw temporary
     commit="$(git -C "${ROOT}" rev-parse HEAD 2>/dev/null || true)"
@@ -416,7 +415,8 @@ run_surface() {
     fi
     if ! rm -f -- "${COVERAGE_ROOT}/${surface}-journey-coverage.json" \
         "${COVERAGE_ROOT}/${surface}-journey-coverage.binding.json" \
-        "${ATTEMPTS_ROOT}/${surface}.json"; then
+        "${ATTEMPTS_ROOT}/${surface}.json" \
+        "${stderr_path}.timeout"; then
         cleanup_status=1
     fi
     : >"${stdout_path}"
@@ -466,6 +466,7 @@ run_surface() {
     export THREETERM_COVERAGE_EVIDENCE_ROOT="${COVERAGE_ROOT}"
     export THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 THREETERM_REQUIRE_IMMUTABLE_WORKERS=1
     started_ms="$(date +%s%3N)"
+    rm -f -- "${stderr_path}.timeout"
     setsid --wait -- "${command[@]}" >"${stdout_path}" 2>"${stderr_path}" &
     pid=$!
     setsid --wait -- bash -e -u -o pipefail -c '

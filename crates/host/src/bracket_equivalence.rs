@@ -5,6 +5,8 @@
 //! equality path.
 
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -407,6 +409,21 @@ pub fn configured_run_id() -> Option<String> {
         .filter(|run_id| !run_id.is_empty())
 }
 
+fn report_root(root: &Path, run_id: &str) -> Result<PathBuf, EquivalenceError> {
+    if run_id.is_empty()
+        || run_id == "."
+        || run_id == ".."
+        || !run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(EquivalenceError::Report(
+            "journey run ID is not a safe path component".to_string(),
+        ));
+    }
+    Ok(root.join(run_id))
+}
+
 pub fn current_source_identity() -> Result<SourceIdentity, EquivalenceError> {
     let commit = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -496,12 +513,13 @@ pub fn publish_journey_evidence_report(
             source_stl.display()
         )));
     }
-    let surface_root = root.join(&report.producer_surface);
-    fs::create_dir_all(&surface_root).map_err(io_error)?;
+    let run_root = report_root(root, &report.run_id)?;
+    let surface_root = run_root.join(&report.producer_surface);
+    ensure_directory_tree(&surface_root, "journey evidence")?;
     let artifact_path = surface_root.join("complete-bracket.stl");
     let artifact_tmp =
         surface_root.join(format!(".complete-bracket.stl.{}.tmp", std::process::id()));
-    fs::copy(source_stl, &artifact_tmp).map_err(io_error)?;
+    copy_file_exclusive(source_stl, &artifact_tmp)?;
     fs::rename(&artifact_tmp, &artifact_path).map_err(io_error)?;
 
     let integrity = verify_path(&artifact_path).map_err(|error| {
@@ -529,7 +547,8 @@ pub fn write_aggregate_report(
     root: &Path,
     report: &AggregateReport,
 ) -> Result<(), EquivalenceError> {
-    write_json_atomically(&aggregate_report_path(root), report)
+    let run_root = report_root(root, &report.run_id)?;
+    write_json_atomically(&aggregate_report_path(&run_root), report)
 }
 
 pub fn write_aggregate_failure(
@@ -537,14 +556,14 @@ pub fn write_aggregate_failure(
     run_id: &str,
     detail: &str,
 ) -> Result<(), EquivalenceError> {
-    fs::create_dir_all(root).map_err(io_error)?;
+    let run_root = report_root(root, run_id)?;
     let failure = json!({
         "schema_version": AGGREGATE_REPORT_SCHEMA_VERSION,
         "run_id": run_id,
         "result": "failed",
         "error": detail,
     });
-    write_json_atomically(&aggregate_report_path(root), &failure)
+    write_json_atomically(&aggregate_report_path(&run_root), &failure)
 }
 
 pub fn compare_three_reports(
@@ -552,7 +571,8 @@ pub fn compare_three_reports(
     run_id: &str,
     recipe: &Value,
 ) -> Result<AggregateReport, EquivalenceError> {
-    let reports = load_reports(root, run_id, recipe)?;
+    let run_root = report_root(root, run_id)?;
+    let reports = load_reports(&run_root, run_id, recipe)?;
     let source = reports
         .first()
         .map(|report| report.source.clone())
@@ -560,7 +580,7 @@ pub fn compare_three_reports(
     let mut producer_surfaces = Vec::with_capacity(reports.len());
     for report in reports {
         let artifact_path = safe_regular_file(
-            root,
+            &run_root,
             Path::new(&report.artifact.path),
             &format!("{} retained STL", report.producer_surface),
         )?;
@@ -689,7 +709,7 @@ fn validate_report(
         || report.producer_surface != expected_surface
         || report.run_id != run_id
         || report.result != "passed"
-        || report.source.commit.is_empty()
+        || !is_hex_identity(&report.source.commit, &[40, 64])
         || report.source.dirty
         || report.recipe.schema_version.is_empty()
         || report.recipe.units != "mm"
@@ -720,10 +740,29 @@ fn validate_report(
         || !report.workers["project_manifest"].is_object()
         || !report.workers["occt_fingerprint"].is_object()
         || !report.runtime.is_object()
-        || report.runtime["surface"] != expected_surface
-        || !has_nonempty_string(&report.runtime, "adapter")
+        || report.runtime["producer_surface"] != expected_surface
+        || !has_nonempty_strings(
+            &report.workers["project_manifest"],
+            &[
+                "schema_version",
+                "revision_hash",
+                "command_registry_hash",
+                "feature_schema_version",
+                "protocol_schema_version",
+                "occt_kernel_version",
+            ],
+        )
+        || !has_nonempty_strings(
+            &report.workers["occt_fingerprint"],
+            &[
+                "worker_kind",
+                "worker_schema_version",
+                "protocol_schema_version",
+            ],
+        )
+        || !has_nonempty_strings(&report.runtime, &["os", "arch", "adapter"])
         || !report.evidence.is_object()
-        || report.artifact.revision_snapshot_hash.is_empty()
+        || !is_hex_identity(&report.artifact.revision_snapshot_hash, &[64])
     {
         return Err(EquivalenceError::Report(format!(
             "{expected_surface} report is missing provenance or evidence"
@@ -759,6 +798,14 @@ fn validate_report(
 
 fn has_nonempty_string(value: &Value, field: &str) -> bool {
     value[field].as_str().is_some_and(|value| !value.is_empty())
+}
+
+fn has_nonempty_strings(value: &Value, fields: &[&str]) -> bool {
+    fields.iter().all(|field| has_nonempty_string(value, field))
+}
+
+fn is_hex_identity(value: &str, lengths: &[usize]) -> bool {
+    lengths.contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn require_command_evidence(evidence: &Value) -> Result<(), EquivalenceError> {
@@ -802,6 +849,51 @@ fn validate_artifact(root: &Path, report: &JourneyEvidenceReport) -> Result<(), 
         )));
     }
     Ok(())
+}
+
+fn ensure_directory_tree(path: &Path, label: &str) -> Result<(), EquivalenceError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                return Err(EquivalenceError::Report(format!(
+                    "{label} directory contains a symlink or non-directory"
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            ensure_directory_tree(parent, label)?;
+            fs::create_dir(path).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                return Err(EquivalenceError::Report(format!(
+                    "{label} directory was replaced during creation"
+                )));
+            }
+        }
+        Err(error) => return Err(io_error(error)),
+    }
+    Ok(())
+}
+
+fn copy_file_exclusive(source: &Path, destination: &Path) -> Result<(), EquivalenceError> {
+    let result = (|| {
+        let mut source = fs::File::open(source).map_err(io_error)?;
+        let mut destination = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+            .map_err(io_error)?;
+        std::io::copy(&mut source, &mut destination).map_err(io_error)?;
+        destination.sync_all().map_err(io_error)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result
 }
 
 fn safe_regular_file(
@@ -1037,19 +1129,28 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Equ
     let parent = path
         .parent()
         .ok_or_else(|| EquivalenceError::Io(format!("path has no parent: {}", path.display())))?;
-    fs::create_dir_all(parent).map_err(io_error)?;
+    ensure_directory_tree(parent, "evidence")?;
     let temporary = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name().unwrap().to_string_lossy(),
         std::process::id()
     ));
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(value)
-            .map_err(|error| EquivalenceError::Report(error.to_string()))?,
-    )
-    .map_err(io_error)?;
-    fs::rename(&temporary, path).map_err(io_error)
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| EquivalenceError::Report(error.to_string()))?;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(io_error)?;
+        file.write_all(&bytes).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        fs::rename(&temporary, path).map_err(io_error)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn io_error(error: std::io::Error) -> EquivalenceError {

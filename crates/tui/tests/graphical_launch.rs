@@ -2232,7 +2232,7 @@ fn production_tui_all_tools_stl_journey() {
                     "occt_fingerprint": serde_json::to_value(worker).expect("worker fingerprint serializes"),
                 }),
                 runtime: json!({
-                    "surface": "tui",
+                    "producer_surface": "tui",
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                     "adapter": "production-ghostty-tui",

@@ -2331,7 +2331,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
                     "occt_fingerprint": serde_json::to_value(worker).expect("worker fingerprint serializes"),
                 }),
                 runtime: json!({
-                    "surface": "api",
+                    "producer_surface": "api",
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                     "adapter": "public-host-dispatcher",

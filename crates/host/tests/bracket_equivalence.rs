@@ -148,7 +148,10 @@ fn retained_journey_publication_copies_and_hashes_the_artifact() {
             .expect("retained report parses");
     assert_eq!(retained["artifact"]["path"], "api/complete-bracket.stl");
     assert!(retained["artifact"]["bytes"].as_u64().unwrap_or_default() > 0);
-    assert!(root.join("api/complete-bracket.stl").is_file());
+    assert!(
+        root.join("run-report-test/api/complete-bracket.stl")
+            .is_file()
+    );
     fs::remove_dir_all(root).expect("report fixture root removes");
 }
 

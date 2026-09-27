@@ -140,6 +140,8 @@ cargo test -p threeterm-host --test bracket_equivalence \
 The aggregate independently verifies each retained STL against the frozen
 recipe before comparing dimensions, volume, topology, voids, landmarks, and
 surface samples. It writes `geometric-equivalence.json` on pass or failure;
+all journey and aggregate reports are stored under the run ID within the
+configured evidence root;
 raw STL bytes, facet order, generated identities, timestamps, paths, and
 transaction IDs are not equivalence keys.
 

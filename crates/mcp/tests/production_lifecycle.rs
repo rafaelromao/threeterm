@@ -1491,7 +1491,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
                     "occt_fingerprint": serde_json::to_value(worker).expect("worker fingerprint serializes"),
                 }),
                 runtime: json!({
-                    "surface": "mcp",
+                    "producer_surface": "mcp",
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                     "adapter": "production-mcp-stdio",

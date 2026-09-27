@@ -675,6 +675,7 @@ fn load_reports(
     let expected_recipe_digest = recipe_digest(recipe);
     let mut reports = Vec::with_capacity(PRODUCER_SURFACES.len());
     let mut source_commit = None;
+    let mut expected_stable_provenance = None;
     for surface in PRODUCER_SURFACES {
         let path = safe_regular_file(
             root,
@@ -694,6 +695,17 @@ fn load_reports(
             }
         } else {
             source_commit = Some(report.source.commit.clone());
+        }
+        let report_provenance = stable_provenance(&report);
+        if let Some(expected) = &expected_stable_provenance {
+            if expected != &report_provenance {
+                return Err(EquivalenceError::Report(
+                    "journey reports have inconsistent schema, worker, kernel, or host runtime identities"
+                        .to_string(),
+                ));
+            }
+        } else {
+            expected_stable_provenance = Some(report_provenance);
         }
         validate_artifact(root, &report)?;
         reports.push(report);
@@ -824,6 +836,24 @@ fn provenance_matches(report: &JourneyEvidenceReport) -> bool {
         && worker["protocol_schema_version"] == manifest["occt_worker"]["protocol_schema_version"]
 }
 
+fn stable_provenance(report: &JourneyEvidenceReport) -> Value {
+    let manifest = &report.workers["project_manifest"];
+    json!({
+        "schemas": {
+            "command_registry": report.schemas["command_registry"],
+            "feature_schema": report.schemas["feature_schema"],
+            "protocol_schema": report.schemas["protocol_schema"],
+            "project_manifest_schema_version": report.schemas["project_manifest_schema_version"],
+        },
+        "occt_fingerprint": report.workers["occt_fingerprint"],
+        "occt_kernel_version": manifest["occt_kernel_version"],
+        "runtime": {
+            "os": report.runtime["os"],
+            "arch": report.runtime["arch"],
+        },
+    })
+}
+
 fn require_command_evidence(evidence: &Value) -> Result<(), EquivalenceError> {
     let executions = evidence["executions"].as_array().ok_or_else(|| {
         EquivalenceError::Report("API report lacks execution evidence".to_string())
@@ -896,6 +926,7 @@ fn ensure_directory_tree(path: &Path, label: &str) -> Result<(), EquivalenceErro
 }
 
 fn copy_file_exclusive(source: &Path, destination: &Path) -> Result<(), EquivalenceError> {
+    let mut created = false;
     let result = (|| {
         let mut source = fs::File::open(source).map_err(io_error)?;
         let mut destination = OpenOptions::new()
@@ -903,10 +934,11 @@ fn copy_file_exclusive(source: &Path, destination: &Path) -> Result<(), Equivale
             .create_new(true)
             .open(destination)
             .map_err(io_error)?;
+        created = true;
         std::io::copy(&mut source, &mut destination).map_err(io_error)?;
         destination.sync_all().map_err(io_error)
     })();
-    if result.is_err() {
+    if result.is_err() && created {
         let _ = fs::remove_file(destination);
     }
     result
@@ -1153,18 +1185,20 @@ fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<(), Equ
     ));
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| EquivalenceError::Report(error.to_string()))?;
+    let mut created = false;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)
             .map_err(io_error)?;
+        created = true;
         file.write_all(&bytes).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         fs::hard_link(&temporary, path).map_err(io_error)?;
         fs::remove_file(&temporary).map_err(io_error)
     })();
-    if result.is_err() {
+    if result.is_err() && created {
         let _ = fs::remove_file(&temporary);
     }
     result

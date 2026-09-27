@@ -354,6 +354,7 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
 run_gate coverage.all-surfaces \
     'graphical TUI producer and all retained API, MCP, and TUI reports pass the named coverage matrix' \
     bash -e -u -o pipefail -c '
+        cargo build -p threeterm-protocol --bin threeterm-coverage --jobs 1
         set +e
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-tui --test graphical_launch \

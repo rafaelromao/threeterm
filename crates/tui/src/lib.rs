@@ -260,14 +260,13 @@ impl CommandGateway for HostCommandGateway<'_> {
     }
 }
 
-fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
+fn write_tool_coverage_marker(command: CommandId, response: &Value, outcome: &str) -> String {
     let contract = find(command).expect("committed TUI command is registered");
     let advertised = if command == LIST_COMMAND_ID {
         response.clone()
     } else {
         Value::Null
     };
-    let mut outcome = coverage::response_outcome(response);
     let marker = json!({
         "command_id": contract.id.0,
         "command_name": contract.name,
@@ -281,6 +280,7 @@ fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
         "registry_hash": registry_hash(),
         "adapter_exposure": advertised,
     });
+    let mut log_outcome = outcome;
     if let Some(path) = env::var_os("THREETERM_COVERAGE_EXECUTION_LOG") {
         let write_result = (|| -> std::io::Result<()> {
             if let Some(parent) = Path::new(&path).parent() {
@@ -290,10 +290,22 @@ fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
             writeln!(file, "{marker}")
         })();
         if write_result.is_err() {
-            outcome = "coverage-write-failed";
+            log_outcome = "coverage-write-failed";
         }
     }
-    format!("[tool-coverage] command={} outcome={outcome}", command.0)
+    format!(
+        "[tool-coverage] command={} outcome={log_outcome}",
+        command.0
+    )
+}
+
+fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
+    write_tool_coverage_marker(command, response, coverage::response_outcome(response))
+}
+
+fn tool_coverage_failure_marker(command: CommandId, error: &str) {
+    let response = json!({"error": error});
+    let _ = write_tool_coverage_marker(command, &response, "failed");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4379,7 +4391,10 @@ impl<R: Renderer> TuiViewportSession<R> {
         };
         let response = match gateway.commit(command, request) {
             Ok(response) => response,
-            Err(error) => return self.reject_commit(host, root, format!("{error:?}")),
+            Err(error) => {
+                tool_coverage_failure_marker(command, &error);
+                return self.reject_commit(host, root, format!("{error:?}"));
+            }
         };
         if command == threeterm_protocol::schema::SKETCH_SOLVE_COMMAND_ID {
             if response["status"] == "invalid_request" {

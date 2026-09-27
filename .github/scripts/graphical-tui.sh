@@ -61,6 +61,7 @@ BRACKET_STEPS_DIR=''
 ALL_TOOLS_TRANSCRIPT=''
 ALL_TOOLS_STEPS_DIR=''
 ALL_TOOLS_DISCOVERY=''
+TOOL_COVERAGE_LOG=''
 DISCOVERY_SCREENSHOT=''
 ALL_TOOLS_CANCEL_REVISION=''
 PROJECT_CREATED_SCREENSHOT=''
@@ -575,6 +576,7 @@ if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
     STL_PATH="${EVIDENCE_ROOT}/../tui-export/complete-bracket.stl"
     STL_INTEGRITY_EVIDENCE="${EVIDENCE_ROOT}/stl-integrity.json"
     SECOND_TUI_STATUS_FILE="${EVIDENCE_ROOT}/second-tui-exit-status"
+    TOOL_COVERAGE_LOG="${EVIDENCE_ROOT}/tool-coverage.jsonl"
 fi
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     PROJECT_IDENTITY="${EVIDENCE_ROOT}/project-identity.json"
@@ -593,6 +595,11 @@ STIMULUS_ERROR="${EVIDENCE_ROOT}/probe-stimulus-error.txt"
 XDG_RUNTIME_DIR="${EVIDENCE_ROOT}/runtime"
 WAYLAND_DISPLAY="threeterm-${BASHPID}.wayland"
 export LC_ALL LANG XDG_RUNTIME_DIR WAYLAND_DISPLAY
+if [[ -n "$TOOL_COVERAGE_LOG" ]]; then
+    export THREETERM_COVERAGE_EXECUTION_LOG="$TOOL_COVERAGE_LOG"
+else
+    unset THREETERM_COVERAGE_EXECUTION_LOG
+fi
 
 if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
     source_commit="$(git -C "$ROOT" rev-parse HEAD)"
@@ -2452,6 +2459,7 @@ write_manifest() {
     if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
         evidence_files+=(
             "$ALL_TOOLS_TRANSCRIPT" "$ALL_TOOLS_DISCOVERY" "$DISCOVERY_SCREENSHOT"
+            "$TOOL_COVERAGE_LOG"
             "$SAVE_SCREENSHOT" "$REOPEN_SCREENSHOT"
             "$VALIDATION_SCREENSHOT" "$EXPORT_SCREENSHOT" "$SELECTION_SCREENSHOT"
             "$ORBIT_SCREENSHOT" "$STL_INTEGRITY_EVIDENCE" "$STL_PATH"
@@ -2459,6 +2467,7 @@ write_manifest() {
         )
         evidence_kinds+=(
             all_tools_transcript all_tools_discovery discovery_screenshot
+            tool_coverage_log
             save_screenshot reopen_screenshot
             validation_screenshot export_screenshot selection_screenshot
             orbit_screenshot stl_integrity exported_stl first_tui_status second_tui_status
@@ -2583,6 +2592,7 @@ write_common_coverage_report() {
     mkdir -p "$coverage_root" || return 1
     "$coverage_binary" tui-report \
         "$MANIFEST" "$ALL_TOOLS_TRANSCRIPT" "$ALL_TOOLS_DISCOVERY" \
+        "$TOOL_COVERAGE_LOG" \
         "${coverage_root}/tui-journey-coverage.json"
 }
 

@@ -1968,12 +1968,13 @@ const REQUIRED_JOURNEY_COMMANDS: &[&str] = &[
     "export",
 ];
 
-fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str) {
+fn record_evidence(evidence: &mut Vec<Value>, command_name: &str, role: &str, response: &Value) {
     let registered = schema::find_by_name(command_name)
         .unwrap_or_else(|| panic!("evidence references unknown command {command_name}"));
     evidence.push(json!({
         "command": command_name,
         "request_schema_version": registered.request_schema_version,
+        "response_payload_hash": coverage::payload_hash(response),
         "role": role,
         "outcome": "ok",
     }));
@@ -2013,8 +2014,14 @@ fn write_common_coverage_report(evidence: &[Value], advertised: &Value) {
                 command_id: contract.id.0.to_string(),
                 command_name: command_name.to_string(),
                 command_schema_version: contract.schema_version.to_string(),
+                request_schema_version: contract.request_schema_version.to_string(),
+                response_schema_version: contract.response_schema_version.to_string(),
                 request_schema_hash: coverage::schema_hash(&contract.request_schema),
                 response_schema_hash: coverage::schema_hash(&contract.response_schema),
+                response_payload_hash: entry["response_payload_hash"]
+                    .as_str()
+                    .expect("API coverage evidence has a response payload hash")
+                    .to_string(),
                 outcome: entry["outcome"].as_str().unwrap_or("failed").to_string(),
                 step_index: Some(step_index as u32),
                 evidence_id: format!("api-{step_index}-{command_name}"),
@@ -2078,8 +2085,10 @@ fn e2e_stl_api_all_tools_l_bracket() {
     let host = Host::new();
     let mut evidence: Vec<Value> = Vec::new();
 
-    let listed = command_response(&host, "list", json!({}));
-    let listed = listed.as_array().expect("list response is a command array");
+    let listed_response = command_response(&host, "list", json!({}));
+    let listed = listed_response
+        .as_array()
+        .expect("list response is a command array");
     let registered: Vec<_> = schema::iter().collect();
     assert_eq!(
         listed.len(),
@@ -2128,14 +2137,14 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "discovery omits required journey command {required}"
         );
     }
-    record_evidence(&mut evidence, "list", "discovery");
+    record_evidence(&mut evidence, "list", "discovery", &listed_response);
 
-    command_response(
+    let created = command_response(
         &host,
         "new-project",
         json!({"destination": workspace.root.to_string_lossy()}),
     );
-    record_evidence(&mut evidence, "new-project", "project-create");
+    record_evidence(&mut evidence, "new-project", "project-create", &created);
 
     let empty = Bundle::at(&workspace.root)
         .open()
@@ -2202,7 +2211,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             assert_eq!(response["operation"], command_name);
             assert_eq!(response["feature_id"], feature_id);
         }
-        record_evidence(&mut evidence, command_name, feature_id);
+        record_evidence(&mut evidence, command_name, feature_id, &response);
         revision = next_revision;
     }
 
@@ -2252,7 +2261,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
         "load",
         json!({"bundle_path": workspace.root.to_string_lossy()}),
     );
-    record_evidence(&mut evidence, "load", "fresh-host-reopen");
+    record_evidence(&mut evidence, "load", "fresh-host-reopen", &reopened);
     for field in ["revision_hash", "feature_graph_hash"] {
         assert_eq!(
             reopened[field], closed_identity[field],
@@ -2279,7 +2288,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "feature_id": "complete-bracket",
         }),
     );
-    record_evidence(&mut evidence, "validate", "delivery-validation");
+    record_evidence(&mut evidence, "validate", "delivery-validation", &validated);
     assert_eq!(validated["status"], "ok");
     assert_eq!(validated["valid"], true);
     assert_eq!(validated["revision_hash"], reopened["revision_hash"]);
@@ -2300,7 +2309,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             mesh_number(&recipe["frozen"]["mesh"], "export_deflection"),
         ),
     );
-    record_evidence(&mut evidence, "export", "delivery-export");
+    record_evidence(&mut evidence, "export", "delivery-export", &exported);
     assert_eq!(exported["status"], "ok");
     assert_eq!(exported["feature_id"], "complete-bracket");
     assert_eq!(exported["source_revision_id"], validated["revision_hash"]);

@@ -469,7 +469,7 @@ fn advertised_contracts(tools: &[Value]) -> Vec<CommandContract> {
 }
 
 fn write_common_coverage_report(
-    journey_evidence: &[(String, String)],
+    journey_evidence: &[(String, String, String)],
     tools: &[Value],
     first: &McpEvidence,
     second: &McpEvidence,
@@ -477,21 +477,26 @@ fn write_common_coverage_report(
     let executions = journey_evidence
         .iter()
         .enumerate()
-        .map(|(step_index, (command_name, call_id))| {
-            let contract = find_by_name(command_name).unwrap_or_else(|| {
-                panic!("MCP coverage references unknown command {command_name}")
-            });
-            ExecutionEvidence {
-                command_id: contract.id.0.to_string(),
-                command_name: command_name.clone(),
-                command_schema_version: contract.schema_version.to_string(),
-                request_schema_hash: coverage::schema_hash(&contract.request_schema),
-                response_schema_hash: coverage::schema_hash(&contract.response_schema),
-                outcome: "ok".to_string(),
-                step_index: Some(step_index as u32),
-                evidence_id: format!("mcp-{step_index}-{call_id}"),
-            }
-        })
+        .map(
+            |(step_index, (command_name, call_id, response_payload_hash))| {
+                let contract = find_by_name(command_name).unwrap_or_else(|| {
+                    panic!("MCP coverage references unknown command {command_name}")
+                });
+                ExecutionEvidence {
+                    command_id: contract.id.0.to_string(),
+                    command_name: command_name.clone(),
+                    command_schema_version: contract.schema_version.to_string(),
+                    request_schema_version: contract.request_schema_version.to_string(),
+                    response_schema_version: contract.response_schema_version.to_string(),
+                    request_schema_hash: coverage::schema_hash(&contract.request_schema),
+                    response_schema_hash: coverage::schema_hash(&contract.response_schema),
+                    response_payload_hash: response_payload_hash.clone(),
+                    outcome: "ok".to_string(),
+                    step_index: Some(step_index as u32),
+                    evidence_id: format!("mcp-{step_index}-{call_id}"),
+                }
+            },
+        )
         .collect();
     let mut raw_transport_methods = vec![
         RawTransportMethod {
@@ -513,16 +518,14 @@ fn write_common_coverage_report(
             correlation_id: None,
         },
     ];
-    raw_transport_methods.extend(
-        journey_evidence
-            .iter()
-            .map(|(_, call_id)| RawTransportMethod {
-                direction: "request".to_string(),
-                method: "tools/call".to_string(),
-                id: Some(call_id.clone()),
-                correlation_id: Some(call_id.clone()),
-            }),
-    );
+    raw_transport_methods.extend(journey_evidence.iter().map(|(_, call_id, _)| {
+        RawTransportMethod {
+            direction: "request".to_string(),
+            method: "tools/call".to_string(),
+            id: Some(call_id.clone()),
+            correlation_id: Some(call_id.clone()),
+        }
+    }));
     let source =
         coverage::capture_source_identity(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
             .expect("MCP coverage source identity is available");
@@ -536,11 +539,7 @@ fn write_common_coverage_report(
         JourneyStreams {
             executions,
             raw_transport_methods,
-            ui_controls: vec![threeterm_protocol::coverage::UiControlEvidence {
-                control: "notifications/initialized".to_string(),
-                outcome: "ok".to_string(),
-                detail: "MCP session initialized".to_string(),
-            }],
+            ..JourneyStreams::default()
         },
     )
     .expect("MCP coverage report writes");
@@ -1171,7 +1170,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         "journey starts with no export fixture"
     );
 
-    let mut journey_evidence: Vec<(String, String)> = Vec::new();
+    let mut journey_evidence: Vec<(String, String, String)> = Vec::new();
     let mut client = McpProcess::spawn();
     let initialized = client.request(
         "initialize",
@@ -1243,7 +1242,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &listed,
     )
     .expect("MCP list response validates");
-    journey_evidence.push(("list".to_string(), "list-command".to_string()));
+    journey_evidence.push((
+        "list".to_string(),
+        "list-command".to_string(),
+        coverage::payload_hash(&listed),
+    ));
 
     let created = client.call_tool(
         "create",
@@ -1260,7 +1263,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &created,
     )
     .expect("MCP new-project response validates");
-    journey_evidence.push(("new-project".to_string(), "create".to_string()));
+    journey_evidence.push((
+        "new-project".to_string(),
+        "create".to_string(),
+        coverage::payload_hash(&created),
+    ));
     let generation_id = created["generation_id"]
         .as_str()
         .expect("new-project returns a generation ID")
@@ -1282,7 +1289,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &identity,
     )
     .expect("MCP identity response validates");
-    journey_evidence.push(("identity".to_string(), "identity".to_string()));
+    journey_evidence.push((
+        "identity".to_string(),
+        "identity".to_string(),
+        coverage::payload_hash(&identity),
+    ));
     assert_eq!(identity["transaction_count"], 0, "journey starts empty");
     assert_eq!(
         identity["revision_hash"], initial_revision,
@@ -1352,7 +1363,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
             assert_eq!(response["operation"], command_name);
             assert_eq!(response["feature_id"], feature_id);
         }
-        journey_evidence.push((command_name.to_string(), call_id));
+        journey_evidence.push((
+            command_name.to_string(),
+            call_id,
+            coverage::payload_hash(&response),
+        ));
         revision = next_revision;
     }
 
@@ -1437,7 +1452,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &loaded,
     )
     .expect("MCP load response validates");
-    journey_evidence.push(("load".to_string(), "load".to_string()));
+    journey_evidence.push((
+        "load".to_string(),
+        "load".to_string(),
+        coverage::payload_hash(&loaded),
+    ));
     assert_eq!(loaded["revision_hash"], finished_revision);
     assert_eq!(loaded["feature_graph_hash"], finished_graph_hash);
 
@@ -1456,7 +1475,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &reloaded_identity,
     )
     .expect("MCP reloaded identity response validates");
-    journey_evidence.push(("identity".to_string(), "identity".to_string()));
+    journey_evidence.push((
+        "identity".to_string(),
+        "identity".to_string(),
+        coverage::payload_hash(&reloaded_identity),
+    ));
     assert_eq!(
         reloaded_identity["transaction_count"], finished_transaction_count,
         "reloaded identity reports every recipe transaction"
@@ -1491,7 +1514,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &validated,
     )
     .expect("MCP validate response validates");
-    journey_evidence.push(("validate".to_string(), "validate".to_string()));
+    journey_evidence.push((
+        "validate".to_string(),
+        "validate".to_string(),
+        coverage::payload_hash(&validated),
+    ));
     assert_eq!(validated["status"], "ok", "MCP validate succeeds");
     assert_eq!(
         validated["valid"], true,
@@ -1528,7 +1555,11 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         &exported,
     )
     .expect("MCP export response validates");
-    journey_evidence.push(("export".to_string(), "export".to_string()));
+    journey_evidence.push((
+        "export".to_string(),
+        "export".to_string(),
+        coverage::payload_hash(&exported),
+    ));
     assert_eq!(exported["status"], "ok", "MCP export succeeds");
     assert_eq!(exported["feature_id"], "complete-bracket");
     assert_eq!(exported["source_revision_id"], finished_revision);
@@ -1576,9 +1607,9 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         .chain(second_evidence.protocol.iter())
         .collect();
     for command_name in &required_commands {
-        let (_, call_id) = journey_evidence
+        let (_, call_id, _) = journey_evidence
             .iter()
-            .find(|(recorded, _)| recorded == command_name)
+            .find(|(recorded, _, _)| recorded == command_name)
             .unwrap_or_else(|| panic!("journey evidence omits required command {command_name}"));
         assert_correlated_structured_ok(&chained_protocol, call_id, command_name);
     }

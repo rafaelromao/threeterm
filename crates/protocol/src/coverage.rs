@@ -87,8 +87,11 @@ pub struct ExecutionEvidence {
     pub command_id: String,
     pub command_name: String,
     pub command_schema_version: String,
+    pub request_schema_version: String,
+    pub response_schema_version: String,
     pub request_schema_hash: String,
     pub response_schema_hash: String,
+    pub response_payload_hash: String,
     pub outcome: String,
     pub step_index: Option<u32>,
     pub evidence_id: String,
@@ -312,6 +315,10 @@ pub fn write_journey_report_with_exposure(
 
 pub fn schema_hash(schema: &Value) -> String {
     sha256_hex(&serde_json::to_vec(schema).expect("JSON schema serializes"))
+}
+
+pub fn payload_hash(payload: &Value) -> String {
+    sha256_hex(&serde_json::to_vec(payload).expect("JSON payload serializes"))
 }
 
 pub fn capture_source_identity(repo_root: &Path) -> Result<SourceIdentity, String> {
@@ -855,8 +862,15 @@ fn compare_contracts(
 fn execution_matches(execution: &ExecutionEvidence, contract: &CommandContract) -> bool {
     execution.command_name == contract.command_name
         && execution.command_schema_version == contract.command_schema_version
+        && execution.request_schema_version == contract.request_schema_version
+        && execution.response_schema_version == contract.response_schema_version
         && execution.request_schema_hash == contract.request_schema_hash
         && execution.response_schema_hash == contract.response_schema_hash
+        && execution.response_payload_hash.len() == 64
+        && execution
+            .response_payload_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 fn format_delta_failure(matrix: &CoverageMatrix) -> String {

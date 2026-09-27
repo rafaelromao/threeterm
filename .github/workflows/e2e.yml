@@ -103,7 +103,7 @@ jobs:
             .evidence.complete == true and
             .result == $expected_result and
             ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
-              "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
+              "workflow.l-bracket", "coverage.all-surfaces", "workflow.box-with-lid", "workflow.reusable-component",
               "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
               "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
               "replay.reattach-edge", "registry.command-schemas",
@@ -112,7 +112,7 @@ jobs:
             (if $expected_result == "passed" then
                (.gates | all(.status == "passed" and .timed_out == false))
              else
-               (.gates | all(if .id == "release.namespace" then
+               (.gates | all(if .id == "release.namespace" or .id == "coverage.all-surfaces" then
                               .status == "failed" and .timed_out == false
                             else
                               .status == "passed" and .timed_out == false

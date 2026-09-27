@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -6,18 +5,27 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 use threeterm_protocol::coverage::{
-    ExecutionEvidence, JourneyStreams, SourceIdentity, Surface, UiControlEvidence,
-    current_registry, new_journey_report, write_json_atomic,
+    CommandContract, ExecutionEvidence, JOURNEY_REPORT_SCHEMA_VERSION, JourneyReport,
+    RECIPE_SCHEMA_VERSION, SourceIdentity, Surface, UiControlEvidence, required_commands,
+    schema_hash, write_json_atomic,
 };
 
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.as_slice() {
-        [command, manifest, transcript, discovery, output] if command == "tui-report" => {
+        [
+            command,
+            manifest,
+            transcript,
+            discovery,
+            coverage_log,
+            output,
+        ] if command == "tui-report" => {
             match write_tui_report(
                 Path::new(manifest),
                 Path::new(transcript),
                 Path::new(discovery),
+                Path::new(coverage_log),
                 Path::new(output),
             ) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -28,7 +36,9 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: threeterm-coverage tui-report MANIFEST TRANSCRIPT DISCOVERY OUTPUT");
+            eprintln!(
+                "usage: threeterm-coverage tui-report MANIFEST TRANSCRIPT DISCOVERY COVERAGE_LOG OUTPUT"
+            );
             ExitCode::from(2)
         }
     }
@@ -38,11 +48,19 @@ fn write_tui_report(
     manifest_path: &Path,
     transcript_path: &Path,
     discovery_path: &Path,
+    coverage_log_path: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
     let manifest = read_json(manifest_path)?;
     let transcript = read_json_lines(transcript_path)?;
-    let discovery = read_json(discovery_path).unwrap_or(Value::Null);
+    let discovery = read_json(discovery_path)?;
+    let markers = read_coverage_log(coverage_log_path)?;
+    if discovery["command"] != "list" {
+        return Err(format!(
+            "{} is not a retained list discovery record",
+            discovery_path.display()
+        ));
+    }
     let source = SourceIdentity {
         commit: manifest["source"]["commit"]
             .as_str()
@@ -51,85 +69,47 @@ fn write_tui_report(
         dirty: manifest["source"]["dirty"].as_bool().unwrap_or(true),
     };
     let result = manifest["result"].as_str().unwrap_or("failed");
-    let observed = transcript
+    let adapter_exposure = markers
         .iter()
-        .filter_map(|entry| entry["command"].as_str())
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    let mut observed_with_lifecycle = observed;
-    if discovery["command"].as_str() == Some("list") && manifest["events"]["discovery"] == "passed"
-    {
-        observed_with_lifecycle.insert("list".to_string());
+        .find(|marker| marker["command_name"] == "list")
+        .map(|marker| parse_contracts(&marker["adapter_exposure"]))
+        .transpose()?
+        .ok_or_else(|| "coverage log has no retained list discovery record".to_string())?;
+    if adapter_exposure.is_empty() {
+        return Err("retained list discovery record advertises no commands".to_string());
     }
-    if manifest["events"]["workflow"] == "passed" {
-        observed_with_lifecycle.insert("new-project".to_string());
-    }
-    if manifest["events"]["lifecycle"] == "passed" {
-        observed_with_lifecycle.insert("save".to_string());
-        observed_with_lifecycle.insert("load".to_string());
-    }
-    if manifest["events"]["validation"] == "passed" {
-        observed_with_lifecycle.insert("validate".to_string());
-    }
-    if manifest["events"]["export"] == "passed" {
-        observed_with_lifecycle.insert("export".to_string());
-    }
-
-    let registry = current_registry();
-    let mut executions = Vec::new();
-    let mut controls = Vec::new();
-    for (step_index, command_name) in threeterm_protocol::coverage::required_commands()
+    let registry_hash = markers
+        .iter()
+        .find_map(|marker| marker["registry_hash"].as_str())
+        .ok_or_else(|| "coverage log has no registry hash".to_string())?
+        .to_string();
+    let executions = markers
         .iter()
         .enumerate()
-    {
-        if observed_with_lifecycle.contains(*command_name) {
-            let contract = registry
-                .rows
-                .iter()
-                .find(|row| row.command_name == *command_name)
-                .ok_or_else(|| format!("required command is not registered: {command_name}"))?;
-            executions.push(ExecutionEvidence {
-                command_id: contract.command_id.clone(),
-                command_name: contract.command_name.clone(),
-                command_schema_version: contract.command_schema_version.clone(),
-                request_schema_hash: contract.request_schema_hash.clone(),
-                response_schema_hash: contract.response_schema_hash.clone(),
-                outcome: "ok".to_string(),
-                step_index: Some(step_index as u32),
-                evidence_id: format!("tui-{step_index}-{command_name}"),
-            });
-            controls.extend([
-                UiControlEvidence {
-                    control: format!("palette-select:{command_name}"),
-                    outcome: "ok".to_string(),
-                    detail: "command selected through the TUI palette".to_string(),
-                },
-                UiControlEvidence {
-                    control: format!("preview:{command_name}"),
-                    outcome: "ok".to_string(),
-                    detail: "preview acknowledgement retained".to_string(),
-                },
-                UiControlEvidence {
-                    control: format!("commit:{command_name}"),
-                    outcome: "ok".to_string(),
-                    detail: "commit acknowledgement retained".to_string(),
-                },
-            ]);
-        }
-    }
-    let report = new_journey_report(
-        Surface::Tui,
-        manifest["test"]
+        .map(|(step_index, marker)| execution_from_marker(marker, step_index))
+        .collect::<Result<Vec<_>, _>>()?;
+    let controls = ui_controls_from_transcript(&transcript)?;
+    let report = JourneyReport {
+        schema_version: JOURNEY_REPORT_SCHEMA_VERSION.to_string(),
+        surface: Surface::Tui,
+        test: manifest["test"]
             .as_str()
-            .unwrap_or("production_tui_all_tools_stl_journey"),
-        result,
+            .unwrap_or("production_tui_all_tools_stl_journey")
+            .to_string(),
+        recipe_schema_version: RECIPE_SCHEMA_VERSION.to_string(),
         source,
-        JourneyStreams {
-            executions,
-            ui_controls: controls,
-            ..JourneyStreams::default()
-        },
-    );
+        result: result.to_string(),
+        registry_hash,
+        registry: adapter_exposure.clone(),
+        required_commands: required_commands()
+            .iter()
+            .map(|command| (*command).to_string())
+            .collect(),
+        adapter_exposure,
+        executions,
+        raw_transport_methods: Vec::new(),
+        ui_controls: controls,
+    };
     write_json_atomic(output_path, &report)
 }
 
@@ -143,7 +123,114 @@ fn read_json_lines(path: &Path) -> Result<Vec<Value>, String> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            serde_json::from_str(line).map_err(|error| format!("{}: {error}", path.display()))
+            let value: Value = serde_json::from_str(line)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            if !value.is_object() || value["command"].as_str().is_none() {
+                return Err(format!(
+                    "{}: transcript entry has no command",
+                    path.display()
+                ));
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+fn read_coverage_log(path: &Path) -> Result<Vec<Value>, String> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let value: Value = serde_json::from_str(line.trim()).map_err(|error| {
+                format!(
+                    "{}: malformed tool coverage marker: {error}",
+                    path.display()
+                )
+            })?;
+            if !value.is_object() || value["command_name"].as_str().is_none() {
+                return Err(format!(
+                    "{}: tool coverage record has no command_name",
+                    path.display()
+                ));
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+fn ui_controls_from_transcript(transcript: &[Value]) -> Result<Vec<UiControlEvidence>, String> {
+    let mut controls = Vec::new();
+    for entry in transcript {
+        let command = entry["command"]
+            .as_str()
+            .ok_or_else(|| "TUI transcript entry has no command".to_string())?;
+        let acknowledgements = entry
+            .get("acknowledgement")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("TUI transcript entry for {command} has no acknowledgements"))?;
+        for control in ["preview", "commit"] {
+            let Some(detail) = acknowledgements.get(control) else {
+                continue;
+            };
+            if detail.is_null() {
+                continue;
+            }
+            controls.push(UiControlEvidence {
+                control: format!("{control}:{command}"),
+                outcome: "ok".to_string(),
+                detail: serde_json::to_string(detail)
+                    .map_err(|error| format!("serialize TUI {control} evidence: {error}"))?,
+            });
+        }
+    }
+    if controls.is_empty() {
+        return Err("TUI transcript retained no non-command control acknowledgements".to_string());
+    }
+    Ok(controls)
+}
+
+fn execution_from_marker(marker: &Value, step_index: usize) -> Result<ExecutionEvidence, String> {
+    let field = |name: &str| {
+        marker[name]
+            .as_str()
+            .ok_or_else(|| format!("tool coverage marker is missing string field {name}"))
+    };
+    let command_name = field("command_name")?;
+    Ok(ExecutionEvidence {
+        command_id: field("command_id")?.to_string(),
+        command_name: command_name.to_string(),
+        command_schema_version: field("command_schema_version")?.to_string(),
+        request_schema_version: field("request_schema_version")?.to_string(),
+        response_schema_version: field("response_schema_version")?.to_string(),
+        request_schema_hash: field("request_schema_hash")?.to_string(),
+        response_schema_hash: field("response_schema_hash")?.to_string(),
+        response_payload_hash: field("response_payload_hash")?.to_string(),
+        outcome: field("outcome")?.to_string(),
+        step_index: Some(step_index as u32),
+        evidence_id: format!("tui-{step_index}-{command_name}"),
+    })
+}
+
+fn parse_contracts(value: &Value) -> Result<Vec<CommandContract>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| "list tool coverage marker has no adapter exposure array".to_string())?
+        .iter()
+        .map(|entry| {
+            let string = |name: &str| {
+                entry[name]
+                    .as_str()
+                    .ok_or_else(|| format!("list discovery row is missing string field {name}"))
+            };
+            Ok(CommandContract {
+                command_id: string("id")?.to_string(),
+                command_name: string("name")?.to_string(),
+                command_schema_version: string("schema_version")?.to_string(),
+                request_schema_version: string("request_schema_version")?.to_string(),
+                response_schema_version: string("response_schema_version")?.to_string(),
+                request_schema_hash: schema_hash(&entry["request_schema"]),
+                response_schema_hash: schema_hash(&entry["response_schema"]),
+            })
         })
         .collect()
 }

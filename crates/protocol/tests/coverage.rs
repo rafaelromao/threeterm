@@ -186,6 +186,29 @@ fn evaluator_allows_a_failed_attempt_when_a_later_attempt_succeeds() {
 }
 
 #[test]
+fn evaluator_rejects_an_unknown_execution_outcome_even_after_success() {
+    let mut report = complete_report(Surface::Api);
+    let mut malformed = report
+        .executions
+        .iter()
+        .find(|execution| execution.command_name == "extrude")
+        .expect("complete report includes extrude")
+        .clone();
+    malformed.outcome = "unknown".to_string();
+    malformed.evidence_id = "api-unknown-extrude".to_string();
+    report.executions.push(malformed);
+
+    let matrix = evaluate([
+        ReportInput::complete(report),
+        ReportInput::complete(complete_report(Surface::Mcp)),
+        ReportInput::complete(complete_report(Surface::Tui)),
+    ]);
+
+    assert_eq!(matrix.result, "failed");
+    assert_delta(&matrix, Surface::Api, "invalid-execution-outcome");
+}
+
+#[test]
 fn evaluator_requires_mcp_transport_and_tui_control_evidence() {
     let mut mcp = complete_report(Surface::Mcp);
     mcp.raw_transport_methods.clear();

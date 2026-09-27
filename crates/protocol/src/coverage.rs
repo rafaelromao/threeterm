@@ -707,6 +707,16 @@ fn add_cells(
 ) {
     let mut seen_execution_ids = BTreeSet::new();
     for execution in executions {
+        if !matches!(execution.outcome.as_str(), "ok" | "failed") {
+            push_delta(
+                deltas,
+                surface,
+                "invalid-execution-outcome",
+                Some(&execution.command_name),
+                "ok or failed",
+                &execution.outcome,
+            );
+        }
         if !current
             .rows
             .iter()

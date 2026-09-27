@@ -61,13 +61,7 @@ fn write_tui_report(
             discovery_path.display()
         ));
     }
-    let source = SourceIdentity {
-        commit: manifest["source"]["commit"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string(),
-        dirty: manifest["source"]["dirty"].as_bool().unwrap_or(true),
-    };
+    let source = source_identity_from_manifest(&manifest)?;
     let result = manifest["result"].as_str().unwrap_or("failed");
     let test = manifest["test"]
         .as_str()
@@ -106,6 +100,26 @@ fn write_tui_report(
         ui_controls: controls,
     };
     write_json_atomic(output_path, &report)
+}
+
+fn source_identity_from_manifest(manifest: &Value) -> Result<SourceIdentity, String> {
+    let source = manifest
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "TUI manifest has no source identity object".to_string())?;
+    let commit = source
+        .get("commit")
+        .and_then(Value::as_str)
+        .filter(|commit| !commit.is_empty())
+        .ok_or_else(|| "TUI manifest source identity has no commit".to_string())?;
+    let dirty = source
+        .get("dirty")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "TUI manifest source identity has no boolean dirty flag".to_string())?;
+    Ok(SourceIdentity {
+        commit: commit.to_string(),
+        dirty,
+    })
 }
 
 fn successful_list_exposure(markers: &[Value]) -> Result<Vec<CommandContract>, String> {
@@ -265,7 +279,7 @@ fn parse_contracts(value: &Value) -> Result<Vec<CommandContract>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::successful_list_exposure;
+    use super::{source_identity_from_manifest, successful_list_exposure};
     use serde_json::json;
 
     #[test]
@@ -293,5 +307,18 @@ mod tests {
 
         let exposure = successful_list_exposure(&markers).expect("successful list is retained");
         assert_eq!(exposure[0].command_name, "list");
+    }
+
+    #[test]
+    fn source_identity_requires_a_boolean_dirty_flag() {
+        let manifest = json!({
+            "source": {
+                "commit": "0123456789abcdef0123456789abcdef01234567",
+                "dirty": "false"
+            }
+        });
+
+        let error = source_identity_from_manifest(&manifest).expect_err("invalid source fails");
+        assert!(error.contains("boolean dirty flag"));
     }
 }

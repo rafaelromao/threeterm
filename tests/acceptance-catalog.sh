@@ -9,8 +9,8 @@ bash -n "${ROOT}/tests/acceptance-runner.sh"
 bash "${ROOT}/tests/acceptance-runner.sh"
 
 gate_count="$(grep -Ec '^run_gate ' "${SCRIPT}")"
-[[ "${gate_count}" -eq 20 ]] || {
-    printf 'expected 20 canonical gates, got %s\n' "${gate_count}" >&2
+[[ "${gate_count}" -eq 21 ]] || {
+    printf 'expected 21 canonical gates, got %s\n' "${gate_count}" >&2
     exit 1
 }
 
@@ -52,6 +52,10 @@ for required in \
     'tools_list_advertises_every_registered_command_with_populated_schemas' \
     'THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS' \
     'THREETERM_ACCEPTANCE_GATE_KILL_GRACE_SECONDS' \
+    'THREETERM_COVERAGE_EVIDENCE_ROOT' \
+    'coverage.all-surfaces' \
+    'all-surfaces-tool-coverage.sh' \
+    'journey-coverage-matrix.json' \
     'reliability.failure-drill' \
     'RELIABILITY_EVIDENCE' \
     'THREETERM_ACCEPTANCE_LIBRARY_ONLY' \

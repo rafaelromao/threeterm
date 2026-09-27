@@ -17,6 +17,7 @@ cd "${ROOT}" || {
 }
 
 export CARGO_TARGET_DIR="${ROOT}/target/acceptance-run"
+COVERAGE_ROOT="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR}/journey-coverage}"
 CATALOG="${THREETERM_ACCEPTANCE_CATALOG:-${ROOT}/target/acceptance-catalog.json}"
 LOG_ROOT="${CARGO_TARGET_DIR}/logs"
 NATIVE_MANIFEST="${CARGO_TARGET_DIR}/native-worker-manifest.json"
@@ -25,7 +26,8 @@ ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
 OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
-JOURNEY_EVIDENCE="${CARGO_TARGET_DIR}/api-journey-coverage/api-journey-coverage.json"
+JOURNEY_EVIDENCE="${COVERAGE_ROOT}/api-journey-coverage.json"
+MATRIX_EVIDENCE="${COVERAGE_ROOT}/journey-coverage-matrix.json"
 RELIABILITY_EVIDENCE="${CARGO_TARGET_DIR}/reliability-failure-drill"
 EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
 EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
@@ -49,9 +51,16 @@ if ! mkdir -p "${LOG_ROOT}"; then
     printf '%s\n' 'acceptance catalog: unable to create acceptance log directory' >&2
     exit 1
 fi
+mkdir -p "${COVERAGE_ROOT}"
+COVERAGE_ROOT="$(cd "${COVERAGE_ROOT}" && pwd)"
+rm -f -- "${COVERAGE_ROOT}/api-journey-coverage.json" \
+    "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
+    "${COVERAGE_ROOT}/tui-journey-coverage.json" \
+    "${COVERAGE_ROOT}/journey-coverage-matrix.json"
+THREETERM_COVERAGE_EVIDENCE_ROOT="${COVERAGE_ROOT}"
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE JOURNEY_EVIDENCE RELIABILITY_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
-export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE RELIABILITY_EVIDENCE
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE COVERAGE_ROOT JOURNEY_EVIDENCE MATRIX_EVIDENCE RELIABILITY_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
+export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE COVERAGE_ROOT THREETERM_COVERAGE_EVIDENCE_ROOT RELIABILITY_EVIDENCE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
 SOURCE_CLEAN=true
@@ -61,6 +70,8 @@ if ! SOURCE_STATUS="$(git status --porcelain --untracked-files=all 2>/dev/null)"
 elif [[ -n "${SOURCE_STATUS}" ]]; then
     SOURCE_CLEAN=false
 fi
+export THREETERM_SOURCE_COMMIT="${SOURCE_COMMIT}"
+export THREETERM_SOURCE_DIRTY="$([[ "${SOURCE_CLEAN}" == true ]] && printf false || printf true)"
 
 declare -a GATE_IDS=()
 declare -a GATE_COMMANDS=()
@@ -258,7 +269,7 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
         THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
             cargo test -p threeterm-mcp --test production_lifecycle \
             e2e_stl_mcp_all_tools_l_bracket \
-            --jobs 1 -- --include-ignored --exact --test-threads=1
+        --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
 run_gate workflow.box-with-lid \
@@ -340,6 +351,27 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
             cargo test -p threeterm-mcp --test mcp_bracket \
             tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+    '
+
+run_gate coverage.all-surfaces \
+    'graphical TUI producer and all retained API, MCP, and TUI reports pass the named coverage matrix' \
+    bash -e -u -o pipefail -c '
+        cargo build -p threeterm-protocol --bin threeterm-coverage --jobs 1
+        set +e
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-tui --test graphical_launch \
+            production_tui_all_tools_stl_journey \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        tui_status=$?
+        set -e
+        bash "${ROOT}/.github/scripts/all-surfaces-tool-coverage.sh" \
+            --evidence-root "${COVERAGE_ROOT}" \
+            --api-report "${COVERAGE_ROOT}/api-journey-coverage.json" \
+            --mcp-report "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
+            --tui-report "${COVERAGE_ROOT}/tui-journey-coverage.json" || matrix_status=$?
+        if [[ "${tui_status}" -ne 0 || "${matrix_status:-0}" -ne 0 ]]; then
+            exit 1
+        fi
     '
 
 run_gate workflow.invalid-edit-recovery \
@@ -538,6 +570,7 @@ done
 add_artifact "${NATIVE_MANIFEST}"
 add_artifact "${OCCT_SMOKE_EVIDENCE}"
 add_artifact "${JOURNEY_EVIDENCE}"
+add_artifact "${MATRIX_EVIDENCE}"
 add_artifact "${LIBSLVS_ARTIFACT}/${ARTIFACT_MANIFEST_RELATIVE##*/}"
 add_artifact "${SCHEMA_RESPONSE}"
 add_artifact "${SCHEMA_PROJECT}/manifest.json"
@@ -672,17 +705,31 @@ if [[ ! -f "${OCCT_SMOKE_EVIDENCE}" ]] || ! jq -e '
     EVIDENCE_VALID=false
 fi
 if [[ ! -f "${JOURNEY_EVIDENCE}" ]] || ! jq -e '
-    . as $root |
-    .schema_version == "threeterm.evidence.api-journey-coverage/1" and
-    .test == "e2e_stl_api_all_tools_l_bracket" and
-    .recipe_schema_version == "threeterm.recipe.bracket-complete/1" and
-    (.required_commands | type == "array" and length == 18) and
-    (.executions | type == "array" and length >= 18) and
-    all(.executions[]; (.command | type == "string" and length > 0) and .outcome == "ok") and
-    all($root.required_commands[];
-        . as $command | any($root.executions[]; .command == $command and .outcome == "ok"))
-    ' "${JOURNEY_EVIDENCE}" >/dev/null 2>&1; then
-    EVIDENCE_VALID=false
+     . as $root |
+     .schema_version == "threeterm.coverage.journey-report/1" and
+     .surface == "api" and
+     .test == "e2e_stl_api_all_tools_l_bracket" and
+     .recipe_schema_version == "threeterm.recipe.bracket-complete/1" and
+     (.required_commands | type == "array" and length == 18) and
+     (.executions | type == "array" and length >= 18) and
+     all(.executions[]; (.command_name | type == "string" and length > 0) and .outcome == "ok" and
+          (.command_schema_version | type == "string" and length > 0) and
+          (.request_schema_hash | test("^[0-9a-f]{64}$")) and
+          (.response_schema_hash | test("^[0-9a-f]{64}$")) and
+          (.response_payload_hash | test("^[0-9a-f]{64}$"))) and
+     all($root.required_commands[];
+         . as $command | any($root.executions[]; .command_name == $command and .outcome == "ok"))
+     ' "${JOURNEY_EVIDENCE}" >/dev/null 2>&1; then
+     EVIDENCE_VALID=false
+fi
+if [[ ! -f "${MATRIX_EVIDENCE}" ]] || ! jq -e '
+     .schema_version == "threeterm.coverage.matrix/1" and
+     (.result == "passed" or .result == "failed") and
+     (.required_commands | type == "array" and length == 18) and
+     (.cells | type == "array") and
+     (.deltas | type == "array")
+     ' "${MATRIX_EVIDENCE}" >/dev/null 2>&1; then
+     EVIDENCE_VALID=false
 fi
 if [[ "${NATIVE_MANIFEST_VERIFIED}" != true ]]; then
     EVIDENCE_VALID=false
@@ -721,7 +768,7 @@ if [[ "${WORKERS}" == '{}' ]] || ! jq -e '
     ' <<<"${WORKERS}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
-for evidence_path in "${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${JOURNEY_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json" \
+for evidence_path in "${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${JOURNEY_EVIDENCE}" "${MATRIX_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json" \
     "${SCHEMA_RESPONSE}" "${SCHEMA_PROJECT}/manifest.json"; do
     evidence_relative="$(relative_artifact_path "${evidence_path}" || true)"
     if [[ -z "${evidence_relative}" ]] || ! jq -e --arg path "${evidence_relative}" '

@@ -106,6 +106,43 @@ The acceptance catalog is the production closure command and records the exact
 source commit, schema and worker identities, gate outcomes, and artifact
 checksums.
 
+### Three-surface geometric equivalence
+
+The three all-tool journey tests can publish a run-scoped evidence set for the
+cross-surface geometry gate. The aggregate is intentionally ignored by the
+ordinary workspace suite because it requires all three production surfaces,
+including qualified Ghostty. Run the API and MCP journeys with the native
+worker, run the TUI journey in the qualified graphical environment, then run
+the one named aggregate test:
+
+```sh
+export THREETERM_JOURNEY_EVIDENCE_ROOT="$PWD/target/journey-equivalence"
+export THREETERM_JOURNEY_RUN_ID="$(git rev-parse HEAD)-$(date +%s)"
+
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+  cargo test -p threeterm-host --test bracket_base_qualification \
+  e2e_stl_api_all_tools_l_bracket --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+  cargo test -p threeterm-mcp --test production_lifecycle \
+  e2e_stl_mcp_all_tools_l_bracket --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+# Run this command in the qualified graphical environment.
+THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+  cargo test -p threeterm-tui --test graphical_launch \
+  production_tui_all_tools_stl_journey --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+cargo test -p threeterm-host --test bracket_equivalence \
+  e2e_stl_three_surface_geometric_equivalence --jobs 1 -- \
+  --include-ignored --exact --test-threads=1
+```
+
+The aggregate independently verifies each retained STL against the frozen
+recipe before comparing dimensions, volume, topology, voids, landmarks, and
+surface samples. It writes `geometric-equivalence.json` on pass or failure;
+raw STL bytes, facet order, generated identities, timestamps, paths, and
+transaction IDs are not equivalence keys.
+
 ## Compatibility contract
 
 The interactive MVP supports only a direct local `xterm-ghostty/1.3.1-arch2`

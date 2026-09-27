@@ -109,6 +109,11 @@ fn point_inside(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
         .unwrap_or(false)
 }
 
+/// Probe material occupancy without repairing or welding the observed mesh.
+pub fn point_inside_mesh(mesh: &StlMeshObservation, point: [f64; 3]) -> bool {
+    point_inside(mesh, point)
+}
+
 fn ray_parity(point: [f64; 3], direction: [f64; 3], mesh: &StlMeshObservation) -> Option<bool> {
     let mut crossings = 0;
     for facet in &mesh.facets {

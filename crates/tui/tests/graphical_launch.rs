@@ -5,6 +5,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+use threeterm_host::bracket_equivalence::{
+    JourneyMetadata, configured_run_id, current_source_identity, evidence_root, new_journey_report,
+    publish_journey_report,
+};
 use threeterm_host::{Host, stl_integrity};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
@@ -2203,6 +2207,48 @@ fn production_tui_all_tools_stl_journey() {
         !envelope_matches,
         "shared oracle must reject the wrong part at the envelope landmark"
     );
+
+    if let Some(run_id) = configured_run_id() {
+        let source = current_source_identity().expect("graphical source identity is available");
+        let worker = OcctWorker::locate()
+            .expect("retained journey requires the selected OCCT worker")
+            .verify_identity()
+            .expect("retained journey records the selected OCCT fingerprint");
+        let report = new_journey_report(
+            run_id,
+            "tui",
+            "production_tui_all_tools_stl_journey",
+            &recipe,
+            JourneyMetadata {
+                source,
+                schemas: json!({
+                    "command_registry": bundle.manifest.command_registry_hash.clone(),
+                    "feature_schema": bundle.manifest.feature_schema_version.clone(),
+                    "protocol_schema": bundle.manifest.protocol_schema_version.clone(),
+                    "project_manifest": bundle.manifest.schema_version.clone(),
+                }),
+                workers: json!({
+                    "project_manifest": serde_json::to_value(&bundle.manifest).expect("manifest serializes"),
+                    "occt_fingerprint": serde_json::to_value(worker).expect("worker fingerprint serializes"),
+                }),
+                runtime: json!({
+                    "surface": "tui",
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "adapter": "production-ghostty-tui",
+                    "toolchain": manifest["toolchain"].clone(),
+                    "configuration": manifest["configuration"].clone(),
+                }),
+                evidence: json!({
+                    "manifest": manifest,
+                    "transcript": stages,
+                }),
+            },
+            bundle.manifest.revision_hash.clone(),
+        );
+        publish_journey_report(&evidence_root(), report, &export_stl)
+            .expect("TUI journey evidence publishes for equivalence");
+    }
 
     fs::remove_dir_all(workspace).expect("all-tools workspace removes");
 }

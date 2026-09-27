@@ -1992,7 +1992,7 @@ fn record_evidence(
         "response_schema_hash": contract.response_schema_hash,
         "response_payload_hash": coverage::payload_hash(response),
         "role": role,
-        "outcome": "ok",
+        "outcome": coverage::response_outcome(response),
     }));
 }
 

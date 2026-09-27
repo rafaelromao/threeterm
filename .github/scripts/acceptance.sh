@@ -270,16 +270,6 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
         --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
-run_gate coverage.all-surfaces \
-    'all retained API, MCP, and TUI reports pass the named coverage matrix' \
-    bash -e -u -o pipefail -c '
-        bash "${ROOT}/.github/scripts/all-surfaces-tool-coverage.sh" \
-            --evidence-root "${COVERAGE_ROOT}" \
-            --api-report "${COVERAGE_ROOT}/api-journey-coverage.json" \
-            --mcp-report "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
-            --tui-report "${COVERAGE_ROOT}/tui-journey-coverage.json"
-    '
-
 run_gate workflow.box-with-lid \
     'THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test box_lid_workflow box_lid_adapter_parity --jobs 1 -- --include-ignored --exact --test-threads=1
 THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm-mcp --test box_lid_workflow box_lid_artifact_discard_replay --jobs 1 -- --include-ignored --exact --test-threads=1
@@ -359,6 +349,26 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
             cargo test -p threeterm-mcp --test mcp_bracket \
             tools_call_to_bracket_produces_a_result_identical_to_the_cli_invocation \
             --jobs 1 -- --include-ignored --exact --test-threads=1
+    '
+
+run_gate coverage.all-surfaces \
+    'graphical TUI producer and all retained API, MCP, and TUI reports pass the named coverage matrix' \
+    bash -e -u -o pipefail -c '
+        set +e
+        THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
+            cargo test -p threeterm-tui --test graphical_launch \
+            production_tui_all_tools_stl_journey \
+            --jobs 1 -- --include-ignored --exact --test-threads=1
+        tui_status=$?
+        set -e
+        bash "${ROOT}/.github/scripts/all-surfaces-tool-coverage.sh" \
+            --evidence-root "${COVERAGE_ROOT}" \
+            --api-report "${COVERAGE_ROOT}/api-journey-coverage.json" \
+            --mcp-report "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
+            --tui-report "${COVERAGE_ROOT}/tui-journey-coverage.json" || matrix_status=$?
+        if [[ "${tui_status}" -ne 0 || "${matrix_status:-0}" -ne 0 ]]; then
+            exit 1
+        fi
     '
 
 run_gate workflow.invalid-edit-recovery \

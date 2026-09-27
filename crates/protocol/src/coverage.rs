@@ -334,6 +334,20 @@ pub fn payload_hash(payload: &Value) -> String {
     sha256_hex(&serde_json::to_vec(payload).expect("JSON payload serializes"))
 }
 
+pub fn response_outcome(response: &Value) -> &'static str {
+    if response.get("error").is_some() {
+        return "failed";
+    }
+    match response
+        .get("outcome")
+        .or_else(|| response.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("failed" | "error" | "invalid_request" | "rejected" | "cancelled") => "failed",
+        _ => "ok",
+    }
+}
+
 pub fn capture_source_identity(repo_root: &Path) -> Result<SourceIdentity, String> {
     let commit = env::var("THREETERM_SOURCE_COMMIT").ok();
     let dirty = env::var("THREETERM_SOURCE_DIRTY").ok();
@@ -536,6 +550,18 @@ pub fn evaluate_with_registry(
                 "at least one retained TUI control acknowledgement",
                 "none",
             );
+        }
+        for control in &report.ui_controls {
+            if control.outcome != "ok" {
+                push_delta(
+                    &mut deltas,
+                    input.surface,
+                    "failed-ui-control",
+                    Some(&control.control),
+                    "ok",
+                    &control.outcome,
+                );
+            }
         }
         append_streams(
             &mut raw_transport_methods,

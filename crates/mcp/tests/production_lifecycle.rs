@@ -493,7 +493,7 @@ fn advertised_contracts(tools: &[Value]) -> Vec<CommandContract> {
 }
 
 fn write_common_coverage_report(
-    journey_evidence: &[(CommandContract, String, String)],
+    journey_evidence: &[(CommandContract, String, String, String)],
     tools: &[Value],
     first: &McpEvidence,
     second: &McpEvidence,
@@ -502,7 +502,7 @@ fn write_common_coverage_report(
         .iter()
         .enumerate()
         .map(
-            |(step_index, (contract, call_id, response_payload_hash))| ExecutionEvidence {
+            |(step_index, (contract, call_id, response_payload_hash, outcome))| ExecutionEvidence {
                 command_id: contract.command_id.clone(),
                 command_name: contract.command_name.clone(),
                 command_schema_version: contract.command_schema_version.clone(),
@@ -511,7 +511,7 @@ fn write_common_coverage_report(
                 request_schema_hash: contract.request_schema_hash.clone(),
                 response_schema_hash: contract.response_schema_hash.clone(),
                 response_payload_hash: response_payload_hash.clone(),
-                outcome: "ok".to_string(),
+                outcome: outcome.clone(),
                 step_index: Some(step_index as u32),
                 evidence_id: format!("mcp-{step_index}-{call_id}"),
             },
@@ -1168,7 +1168,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         "journey starts with no export fixture"
     );
 
-    let mut journey_evidence: Vec<(CommandContract, String, String)> = Vec::new();
+    let mut journey_evidence: Vec<(CommandContract, String, String, String)> = Vec::new();
     let mut client = McpProcess::spawn();
     let initialized = client.request(
         "initialize",
@@ -1239,6 +1239,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(list_contract),
         "list-command".to_string(),
         coverage::payload_hash(&listed),
+        coverage::response_outcome(&listed).to_string(),
     ));
 
     let new_project_contract = find(NEW_PROJECT_COMMAND_ID).expect("new-project is registered");
@@ -1259,6 +1260,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(new_project_contract),
         "create".to_string(),
         coverage::payload_hash(&created),
+        coverage::response_outcome(&created).to_string(),
     ));
     let generation_id = created["generation_id"]
         .as_str()
@@ -1284,6 +1286,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(identity_contract),
         "identity".to_string(),
         coverage::payload_hash(&identity),
+        coverage::response_outcome(&identity).to_string(),
     ));
     assert_eq!(identity["transaction_count"], 0, "journey starts empty");
     assert_eq!(
@@ -1358,6 +1361,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
             coverage::command_contract(registered),
             call_id,
             coverage::payload_hash(&response),
+            coverage::response_outcome(&response).to_string(),
         ));
         revision = next_revision;
     }
@@ -1440,6 +1444,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(load_contract),
         "load".to_string(),
         coverage::payload_hash(&loaded),
+        coverage::response_outcome(&loaded).to_string(),
     ));
     assert_eq!(loaded["revision_hash"], finished_revision);
     assert_eq!(loaded["feature_graph_hash"], finished_graph_hash);
@@ -1462,6 +1467,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(reloaded_identity_contract),
         "identity".to_string(),
         coverage::payload_hash(&reloaded_identity),
+        coverage::response_outcome(&reloaded_identity).to_string(),
     ));
     assert_eq!(
         reloaded_identity["transaction_count"], finished_transaction_count,
@@ -1500,6 +1506,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(validate_contract),
         "validate".to_string(),
         coverage::payload_hash(&validated),
+        coverage::response_outcome(&validated).to_string(),
     ));
     assert_eq!(validated["status"], "ok", "MCP validate succeeds");
     assert_eq!(
@@ -1540,6 +1547,7 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         coverage::command_contract(export_contract),
         "export".to_string(),
         coverage::payload_hash(&exported),
+        coverage::response_outcome(&exported).to_string(),
     ));
     assert_eq!(exported["status"], "ok", "MCP export succeeds");
     assert_eq!(exported["feature_id"], "complete-bracket");
@@ -1588,9 +1596,9 @@ fn e2e_stl_mcp_all_tools_l_bracket() {
         .chain(second_evidence.protocol.iter())
         .collect();
     for command_name in &required_commands {
-        let (_, call_id, _) = journey_evidence
+        let (_, call_id, _, _) = journey_evidence
             .iter()
-            .find(|(recorded, _, _)| recorded.command_name == *command_name)
+            .find(|(recorded, _, _, _)| recorded.command_name == *command_name)
             .unwrap_or_else(|| panic!("journey evidence omits required command {command_name}"));
         assert_correlated_structured_ok(&chained_protocol, call_id, command_name);
     }

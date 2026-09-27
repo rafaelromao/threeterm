@@ -267,6 +267,7 @@ fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
     } else {
         Value::Null
     };
+    let mut outcome = coverage::response_outcome(response);
     let marker = json!({
         "command_id": contract.id.0,
         "command_name": contract.name,
@@ -276,11 +277,10 @@ fn tool_coverage_marker(command: CommandId, response: &Value) -> String {
         "request_schema_hash": coverage::schema_hash(&contract.request_schema),
         "response_schema_hash": coverage::schema_hash(&contract.response_schema),
         "response_payload_hash": coverage::payload_hash(response),
-        "outcome": "ok",
+        "outcome": outcome,
         "registry_hash": registry_hash(),
         "adapter_exposure": advertised,
     });
-    let mut outcome = "ok";
     if let Some(path) = env::var_os("THREETERM_COVERAGE_EXECUTION_LOG") {
         let write_result = (|| -> std::io::Result<()> {
             if let Some(parent) = Path::new(&path).parent() {

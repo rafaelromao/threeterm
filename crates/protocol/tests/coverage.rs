@@ -184,6 +184,25 @@ fn evaluator_requires_mcp_transport_and_tui_control_evidence() {
 }
 
 #[test]
+fn evaluator_rejects_failed_tui_control_evidence() {
+    let mut tui = complete_report(Surface::Tui);
+    tui.ui_controls[0].outcome = "failed".to_string();
+
+    let matrix = evaluate([
+        ReportInput::complete(complete_report(Surface::Api)),
+        ReportInput::complete(complete_report(Surface::Mcp)),
+        ReportInput::complete(tui),
+    ]);
+
+    assert_eq!(matrix.result, "failed");
+    assert!(
+        matrix.deltas.iter().any(|delta| {
+            delta.kind == "failed-ui-control" && delta.surface == Some(Surface::Tui)
+        })
+    );
+}
+
+#[test]
 fn evaluator_identifies_advertised_inventory_and_schema_drift() {
     let mut report = complete_report(Surface::Mcp);
     report.adapter_exposure.pop();

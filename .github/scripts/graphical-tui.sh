@@ -475,7 +475,7 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     fi
 elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
     coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
-    TOOL_COVERAGE_LOG="${EVIDENCE_ROOT}/tool-coverage.jsonl"
+    TOOL_COVERAGE_LOG="${coverage_root}/tool-coverage.jsonl"
     mkdir -p "$coverage_root"
     rm -f -- "$coverage_root/tui-journey-coverage.json" \
         "$coverage_root/journey-coverage-matrix.json" \
@@ -2408,6 +2408,7 @@ write_manifest() {
     local final_status="$1"
     local artifacts='[]'
     local kind path bytes digest record
+    local coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
     local -a evidence_files=(
         "$PTY_OUTPUT" "$PTY_INPUT" "$TUI_STDERR" "$WESTON_LOG" "$TOOL_VERSIONS"
         "$STARTUP_SCREENSHOT" "$PROJECT_CREATED_SCREENSHOT" "$EXTRUSION_COMMITTED_SCREENSHOT"
@@ -2434,6 +2435,10 @@ write_manifest() {
         cleanup_screenshot failure_screenshot
         orbit_difference window_screenshot probe_stimulus_error
     )
+    if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+        evidence_files+=("${coverage_root}/tui-journey-coverage.json")
+        evidence_kinds+=(tui_journey_coverage_report)
+    fi
     if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         evidence_files+=(
             "$PROJECT_IDENTITY"
@@ -2643,9 +2648,9 @@ on_exit() {
             final_status=1
             failure_code='coverage_report_unavailable'
             failure_detail='the common TUI journey report could not be retained'
-            write_manifest "$final_status"
         fi
     fi
+    write_manifest "$final_status"
     exit "$final_status"
 }
 

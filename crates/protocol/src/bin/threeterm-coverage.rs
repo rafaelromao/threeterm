@@ -159,6 +159,14 @@ fn read_coverage_log(path: &Path) -> Result<Vec<Value>, String> {
 }
 
 fn ui_controls_from_transcript(transcript: &[Value]) -> Result<Vec<UiControlEvidence>, String> {
+    const UI_CONTROL_FIELDS: &[&str] = &[
+        "preview",
+        "commit",
+        "preview_marker",
+        "commit_marker",
+        "selection_marker",
+        "selection_text",
+    ];
     let mut controls = Vec::new();
     for entry in transcript {
         let command = entry["command"]
@@ -169,12 +177,27 @@ fn ui_controls_from_transcript(transcript: &[Value]) -> Result<Vec<UiControlEvid
             .and_then(Value::as_object)
             .ok_or_else(|| format!("TUI transcript entry for {command} has no acknowledgements"))?;
         for (control, detail) in acknowledgements {
-            if detail.is_null() {
+            if detail.is_null() || !UI_CONTROL_FIELDS.contains(&control.as_str()) {
                 continue;
             }
+            let outcome = detail
+                .get("outcome")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    let serialized = detail.to_string().to_ascii_lowercase();
+                    if ["failed", "error", "rejected", "cancelled"]
+                        .iter()
+                        .any(|marker| serialized.contains(marker))
+                    {
+                        "failed".to_string()
+                    } else {
+                        "ok".to_string()
+                    }
+                });
             controls.push(UiControlEvidence {
                 control: format!("{control}:{command}"),
-                outcome: "ok".to_string(),
+                outcome,
                 detail: serde_json::to_string(detail)
                     .map_err(|error| format!("serialize TUI {control} evidence: {error}"))?,
             });

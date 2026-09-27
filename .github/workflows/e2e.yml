@@ -105,9 +105,9 @@ jobs:
             .evidence.complete == true and
             .result == $expected_result and
             ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
-              "workflow.l-bracket", "coverage.all-surfaces", "workflow.box-with-lid", "workflow.reusable-component",
-              "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
-              "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
+              "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
+               "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
+               "coverage.all-surfaces", "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
               "replay.reattach-edge", "registry.command-schemas",
               "schema.identities", "licensing.libslvs", "release.namespace",
               "documentation.workspace", "performance.claims"]) and

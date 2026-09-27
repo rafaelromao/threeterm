@@ -15,6 +15,7 @@ use threeterm_host::stl_integrity::{observe_path, verify_path};
 use threeterm_occt_worker::{EdgeCandidateEvidence, EdgeInspectionResult, OcctWorker};
 use threeterm_persistence::Bundle;
 use threeterm_protocol::artifact::sha256_hex;
+use threeterm_protocol::coverage::{self, ExecutionEvidence, JourneyStreams, Surface};
 use threeterm_protocol::schema;
 use threeterm_protocol::schema_validator::validate;
 
@@ -1997,6 +1998,70 @@ fn write_journey_evidence(path: &Path, evidence: &Value) {
     fs::rename(&temporary, path).expect("journey evidence publishes atomically");
 }
 
+fn write_common_coverage_report(evidence: &[Value], advertised: &Value) {
+    let executions = evidence
+        .iter()
+        .enumerate()
+        .map(|(step_index, entry)| {
+            let command_name = entry["command"]
+                .as_str()
+                .expect("coverage evidence command is a string");
+            let contract = schema::find_by_name(command_name).unwrap_or_else(|| {
+                panic!("coverage evidence references unknown command {command_name}")
+            });
+            ExecutionEvidence {
+                command_id: contract.id.0.to_string(),
+                command_name: command_name.to_string(),
+                command_schema_version: contract.schema_version.to_string(),
+                request_schema_hash: coverage::schema_hash(&contract.request_schema),
+                response_schema_hash: coverage::schema_hash(&contract.response_schema),
+                outcome: entry["outcome"].as_str().unwrap_or("failed").to_string(),
+                step_index: Some(step_index as u32),
+                evidence_id: format!("api-{step_index}-{command_name}"),
+            }
+        })
+        .collect();
+    let source =
+        coverage::capture_source_identity(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("API coverage source identity is available");
+    let adapter_exposure = advertised
+        .as_array()
+        .expect("API discovery is an array")
+        .iter()
+        .map(|entry| coverage::CommandContract {
+            command_id: entry["id"].as_str().unwrap_or("unknown").to_string(),
+            command_name: entry["name"].as_str().unwrap_or("unknown").to_string(),
+            command_schema_version: entry["schema_version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            request_schema_version: entry["request_schema_version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            response_schema_version: entry["response_schema_version"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            request_schema_hash: coverage::schema_hash(&entry["request_schema"]),
+            response_schema_hash: coverage::schema_hash(&entry["response_schema"]),
+        })
+        .collect();
+    coverage::write_journey_report_with_exposure(
+        &coverage::report_root(),
+        Surface::Api,
+        "e2e_stl_api_all_tools_l_bracket",
+        "passed",
+        source,
+        adapter_exposure,
+        JourneyStreams {
+            executions,
+            ..JourneyStreams::default()
+        },
+    )
+    .expect("API coverage report writes");
+}
+
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_api_all_tools_l_bracket() {
@@ -2274,6 +2339,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "executions": evidence,
         }),
     );
+    write_common_coverage_report(&evidence, &Value::Array(listed.to_vec()));
     let retained: Value =
         serde_json::from_slice(&fs::read(&evidence_path).expect("journey evidence file reads"))
             .expect("journey evidence file parses");

@@ -602,6 +602,8 @@ if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
         source_dirty=true
     fi
 fi
+export THREETERM_SOURCE_COMMIT="$source_commit"
+export THREETERM_SOURCE_DIRTY="$source_dirty"
 
 json_escape_minimal() {
     local value="$1"
@@ -2559,6 +2561,31 @@ write_manifest() {
     fi
 }
 
+write_common_coverage_report() {
+    [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]] || return 0
+    local coverage_binary="${THREETERM_COVERAGE_BINARY:-}"
+    if [[ -z "$coverage_binary" ]]; then
+        local target_root="${CARGO_TARGET_DIR:-${ROOT}/target}"
+        for coverage_binary in \
+            "$target_root/debug/threeterm-coverage" \
+            "$target_root/debug/deps/threeterm-coverage"*; do
+            [[ -x "$coverage_binary" ]] && break
+        done
+    fi
+    [[ -x "$coverage_binary" ]] || {
+        [[ "$success" == 1 ]] && {
+            failure_code='coverage_utility_unavailable'
+            failure_detail='workspace coverage utility is not executable'
+        }
+        return 1
+    }
+    local coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
+    mkdir -p "$coverage_root" || return 1
+    "$coverage_binary" tui-report \
+        "$MANIFEST" "$ALL_TOOLS_TRANSCRIPT" "$ALL_TOOLS_DISCOVERY" \
+        "${coverage_root}/tui-journey-coverage.json"
+}
+
 on_exit() {
     local final_status=$?
     trap - EXIT INT TERM
@@ -2585,6 +2612,15 @@ on_exit() {
         failure_detail='transient source revision could not be removed from retained evidence'
     fi
     write_manifest "$final_status"
+    if ! write_common_coverage_report; then
+        if [[ "$success" == 1 && "$final_status" == 0 ]]; then
+            success=0
+            final_status=1
+            failure_code='coverage_report_unavailable'
+            failure_detail='the common TUI journey report could not be retained'
+            write_manifest "$final_status"
+        fi
+    fi
     exit "$final_status"
 }
 

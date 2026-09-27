@@ -25,7 +25,7 @@ ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
 OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
-JOURNEY_EVIDENCE="${CARGO_TARGET_DIR}/api-journey-coverage/api-journey-coverage.json"
+JOURNEY_EVIDENCE="${CARGO_TARGET_DIR}/journey-coverage/api-journey-coverage.json"
 EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
 EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
 EXPECTED_OCCT_WORKER_SCHEMA='threeterm.workers.occt/1'
@@ -60,6 +60,8 @@ if ! SOURCE_STATUS="$(git status --porcelain --untracked-files=all 2>/dev/null)"
 elif [[ -n "${SOURCE_STATUS}" ]]; then
     SOURCE_CLEAN=false
 fi
+export THREETERM_SOURCE_COMMIT="${SOURCE_COMMIT}"
+export THREETERM_SOURCE_DIRTY="$([[ "${SOURCE_CLEAN}" == true ]] && printf false || printf true)"
 
 declare -a GATE_IDS=()
 declare -a GATE_COMMANDS=()
@@ -649,16 +651,20 @@ if [[ ! -f "${OCCT_SMOKE_EVIDENCE}" ]] || ! jq -e '
     EVIDENCE_VALID=false
 fi
 if [[ ! -f "${JOURNEY_EVIDENCE}" ]] || ! jq -e '
-    . as $root |
-    .schema_version == "threeterm.evidence.api-journey-coverage/1" and
-    .test == "e2e_stl_api_all_tools_l_bracket" and
-    .recipe_schema_version == "threeterm.recipe.bracket-complete/1" and
-    (.required_commands | type == "array" and length == 18) and
-    (.executions | type == "array" and length >= 18) and
-    all(.executions[]; (.command | type == "string" and length > 0) and .outcome == "ok") and
-    all($root.required_commands[];
-        . as $command | any($root.executions[]; .command == $command and .outcome == "ok"))
-    ' "${JOURNEY_EVIDENCE}" >/dev/null 2>&1; then
+     . as $root |
+     .schema_version == "threeterm.coverage.journey-report/1" and
+     .surface == "api" and
+     .test == "e2e_stl_api_all_tools_l_bracket" and
+     .recipe_schema_version == "threeterm.recipe.bracket-complete/1" and
+     (.required_commands | type == "array" and length == 18) and
+     (.executions | type == "array" and length >= 18) and
+     all(.executions[]; (.command_name | type == "string" and length > 0) and .outcome == "ok" and
+         (.command_schema_version | type == "string" and length > 0) and
+         (.request_schema_hash | test("^[0-9a-f]{64}$")) and
+         (.response_schema_hash | test("^[0-9a-f]{64}$"))) and
+     all($root.required_commands[];
+         . as $command | any($root.executions[]; .command_name == $command and .outcome == "ok"))
+     ' "${JOURNEY_EVIDENCE}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
 if [[ "${NATIVE_MANIFEST_VERIFIED}" != true ]]; then

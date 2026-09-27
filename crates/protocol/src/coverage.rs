@@ -714,7 +714,7 @@ fn add_cells(
             .cloned()
             .collect::<Vec<_>>();
         for execution in &matching {
-            if execution.outcome != "ok" {
+            if execution.outcome != "ok" && successful.is_empty() {
                 push_delta(
                     deltas,
                     surface,

@@ -112,6 +112,40 @@ fn evaluator_reports_missing_execution_and_keeps_non_domain_evidence_separate() 
 }
 
 #[test]
+fn evaluator_allows_a_failed_attempt_when_a_later_attempt_succeeds() {
+    let mut report = complete_report(Surface::Api);
+    let mut failed = report
+        .executions
+        .iter()
+        .find(|execution| execution.command_name == "extrude")
+        .expect("complete report includes extrude")
+        .clone();
+    failed.outcome = "failed".to_string();
+    failed.evidence_id = "api-failed-extrude".to_string();
+    report.executions.push(failed);
+
+    let matrix = evaluate([
+        ReportInput::complete(report),
+        ReportInput::complete(complete_report(Surface::Mcp)),
+        ReportInput::complete(complete_report(Surface::Tui)),
+    ]);
+
+    assert_eq!(matrix.result, "passed");
+    assert!(!matrix.deltas.iter().any(|delta| {
+        delta.surface == Some(Surface::Api)
+            && delta.kind == "failed-execution"
+            && delta.command.as_deref() == Some("extrude")
+    }));
+    let extrude = matrix
+        .cells
+        .iter()
+        .find(|cell| cell.surface == Surface::Api && cell.command_name == "extrude")
+        .expect("extrude cell exists");
+    assert_eq!(extrude.execution_count, 1);
+    assert_eq!(extrude.status, "passed");
+}
+
+#[test]
 fn evaluator_identifies_advertised_inventory_and_schema_drift() {
     let mut report = complete_report(Surface::Mcp);
     report.adapter_exposure.pop();

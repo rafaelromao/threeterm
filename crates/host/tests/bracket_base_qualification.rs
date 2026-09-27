@@ -2106,12 +2106,12 @@ fn write_common_coverage_report(evidence: &[Value], advertised: &Value) {
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_api_all_tools_l_bracket() {
+    coverage::remove_journey_report(&coverage::report_root(), Surface::Api)
+        .expect("stale API coverage report clears");
     let recipe: Value =
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");
     assert_complete_recipe_structure(&recipe);
 
-    coverage::remove_journey_report(&coverage::report_root(), Surface::Api)
-        .expect("stale API coverage report clears");
     let workspace = QualificationWorkspace::new();
     assert!(
         !workspace.root.exists(),
@@ -2405,7 +2405,6 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "executions": evidence,
         }),
     );
-    write_common_coverage_report(&evidence, &Value::Array(listed.to_vec()));
     let retained: Value =
         serde_json::from_slice(&fs::read(&evidence_path).expect("journey evidence file reads"))
             .expect("journey evidence file parses");
@@ -2425,6 +2424,7 @@ fn e2e_stl_api_all_tools_l_bracket() {
             "retained evidence omits ok outcome for {required}"
         );
     }
+    write_common_coverage_report(&evidence, &Value::Array(listed.to_vec()));
     drop(workspace);
     assert!(
         evidence_path.is_file(),

@@ -1143,9 +1143,9 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
 #[test]
 #[ignore = "requires the pinned native OCCT worker; canonical E2E runs ignored tests"]
 fn e2e_stl_mcp_all_tools_l_bracket() {
-    require_native_worker("e2e_stl_mcp_all_tools_l_bracket");
     coverage::remove_journey_report(&coverage::report_root(), Surface::Mcp)
         .expect("stale MCP coverage report clears");
+    require_native_worker("e2e_stl_mcp_all_tools_l_bracket");
 
     let recipe: Value =
         serde_json::from_str(COMPLETE_RECIPE).expect("complete recipe is valid JSON");

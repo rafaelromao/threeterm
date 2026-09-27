@@ -475,10 +475,11 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     fi
 elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
     coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
+    TOOL_COVERAGE_LOG="${EVIDENCE_ROOT}/tool-coverage.jsonl"
     mkdir -p "$coverage_root"
     rm -f -- "$coverage_root/tui-journey-coverage.json" \
         "$coverage_root/journey-coverage-matrix.json" \
-        "$coverage_root/tool-coverage.jsonl"
+        "$TOOL_COVERAGE_LOG"
     project_parent=''
     if project_parent="$(cd "$(dirname "$PROJECT_ROOT")" 2>/dev/null && pwd)"; then
         PROJECT_ROOT="${project_parent}/$(basename "$PROJECT_ROOT")"
@@ -581,7 +582,6 @@ if [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
     STL_PATH="${EVIDENCE_ROOT}/../tui-export/complete-bracket.stl"
     STL_INTEGRITY_EVIDENCE="${EVIDENCE_ROOT}/stl-integrity.json"
     SECOND_TUI_STATUS_FILE="${EVIDENCE_ROOT}/second-tui-exit-status"
-    TOOL_COVERAGE_LOG="${EVIDENCE_ROOT}/tool-coverage.jsonl"
 fi
 if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
     PROJECT_IDENTITY="${EVIDENCE_ROOT}/project-identity.json"
@@ -606,7 +606,12 @@ else
     unset THREETERM_COVERAGE_EXECUTION_LOG
 fi
 
-if git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
+if [[ -n "${THREETERM_SOURCE_COMMIT:-}" || -n "${THREETERM_SOURCE_DIRTY:-}" ]]; then
+    [[ -n "${THREETERM_SOURCE_COMMIT:-}" && -n "${THREETERM_SOURCE_DIRTY:-}" ]] ||
+        die source_identity_incomplete 'THREETERM_SOURCE_COMMIT and THREETERM_SOURCE_DIRTY must be supplied together'
+    source_commit="$THREETERM_SOURCE_COMMIT"
+    source_dirty="$THREETERM_SOURCE_DIRTY"
+elif git -C "$ROOT" rev-parse HEAD >/dev/null 2>&1; then
     source_commit="$(git -C "$ROOT" rev-parse HEAD)"
     if git -C "$ROOT" diff --quiet && git -C "$ROOT" diff --cached --quiet; then
         source_dirty=false

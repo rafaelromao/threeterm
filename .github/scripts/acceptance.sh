@@ -17,6 +17,7 @@ cd "${ROOT}" || {
 }
 
 export CARGO_TARGET_DIR="${ROOT}/target/acceptance-run"
+COVERAGE_ROOT="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR}/journey-coverage}"
 CATALOG="${THREETERM_ACCEPTANCE_CATALOG:-${ROOT}/target/acceptance-catalog.json}"
 LOG_ROOT="${CARGO_TARGET_DIR}/logs"
 NATIVE_MANIFEST="${CARGO_TARGET_DIR}/native-worker-manifest.json"
@@ -25,8 +26,8 @@ ARTIFACT_MANIFEST_RELATIVE='libslvs-artifact/manifest.json'
 SCHEMA_PROJECT="${CARGO_TARGET_DIR}/schema-project"
 SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
 OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
-JOURNEY_EVIDENCE="${CARGO_TARGET_DIR}/journey-coverage/api-journey-coverage.json"
-MATRIX_EVIDENCE="${CARGO_TARGET_DIR}/journey-coverage/journey-coverage-matrix.json"
+JOURNEY_EVIDENCE="${COVERAGE_ROOT}/api-journey-coverage.json"
+MATRIX_EVIDENCE="${COVERAGE_ROOT}/journey-coverage-matrix.json"
 EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
 EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
 EXPECTED_OCCT_WORKER_SCHEMA='threeterm.workers.occt/1'
@@ -49,13 +50,15 @@ if ! mkdir -p "${LOG_ROOT}"; then
     printf '%s\n' 'acceptance catalog: unable to create acceptance log directory' >&2
     exit 1
 fi
-rm -f -- "${CARGO_TARGET_DIR}/journey-coverage/api-journey-coverage.json" \
-    "${CARGO_TARGET_DIR}/journey-coverage/mcp-journey-coverage.json" \
-    "${CARGO_TARGET_DIR}/journey-coverage/tui-journey-coverage.json" \
-    "${CARGO_TARGET_DIR}/journey-coverage/journey-coverage-matrix.json"
+mkdir -p "${COVERAGE_ROOT}"
+rm -f -- "${COVERAGE_ROOT}/api-journey-coverage.json" \
+    "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
+    "${COVERAGE_ROOT}/tui-journey-coverage.json" \
+    "${COVERAGE_ROOT}/journey-coverage-matrix.json"
+THREETERM_COVERAGE_EVIDENCE_ROOT="${COVERAGE_ROOT}"
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE JOURNEY_EVIDENCE MATRIX_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
-export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE COVERAGE_ROOT JOURNEY_EVIDENCE MATRIX_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
+export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE THREETERM_COVERAGE_EVIDENCE_ROOT
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
 SOURCE_CLEAN=true
@@ -271,10 +274,10 @@ run_gate coverage.all-surfaces \
     'all retained API, MCP, and TUI reports pass the named coverage matrix' \
     bash -e -u -o pipefail -c '
         bash "${ROOT}/.github/scripts/all-surfaces-tool-coverage.sh" \
-            --evidence-root "${CARGO_TARGET_DIR}/journey-coverage" \
-            --api-report "${CARGO_TARGET_DIR}/journey-coverage/api-journey-coverage.json" \
-            --mcp-report "${CARGO_TARGET_DIR}/journey-coverage/mcp-journey-coverage.json" \
-            --tui-report "${CARGO_TARGET_DIR}/journey-coverage/tui-journey-coverage.json"
+            --evidence-root "${COVERAGE_ROOT}" \
+            --api-report "${COVERAGE_ROOT}/api-journey-coverage.json" \
+            --mcp-report "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
+            --tui-report "${COVERAGE_ROOT}/tui-journey-coverage.json"
     '
 
 run_gate workflow.box-with-lid \

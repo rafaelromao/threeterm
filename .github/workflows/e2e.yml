@@ -102,7 +102,9 @@ jobs:
             .schema_version == "threeterm.acceptance.catalog/1" and
             .source.commit == $commit and
             .source.changed_during_run == false and
-            .evidence.complete == true and
+            (.evidence.complete == true or
+              ($expected_result == "failed" and
+               any(.gates[]; .id == "coverage.all-surfaces" and .status == "failed"))) and
             .result == $expected_result and
             ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
               "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",

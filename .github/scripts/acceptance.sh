@@ -51,6 +51,7 @@ if ! mkdir -p "${LOG_ROOT}"; then
     exit 1
 fi
 mkdir -p "${COVERAGE_ROOT}"
+COVERAGE_ROOT="$(cd "${COVERAGE_ROOT}" && pwd)"
 rm -f -- "${COVERAGE_ROOT}/api-journey-coverage.json" \
     "${COVERAGE_ROOT}/mcp-journey-coverage.json" \
     "${COVERAGE_ROOT}/tui-journey-coverage.json" \

@@ -28,6 +28,7 @@ SCHEMA_RESPONSE="${CARGO_TARGET_DIR}/schema-response.json"
 OCCT_SMOKE_EVIDENCE="${CARGO_TARGET_DIR}/occt-geometry-smoke/real-occt-geometry-smoke.json"
 JOURNEY_EVIDENCE="${COVERAGE_ROOT}/api-journey-coverage.json"
 MATRIX_EVIDENCE="${COVERAGE_ROOT}/journey-coverage-matrix.json"
+RELIABILITY_EVIDENCE="${CARGO_TARGET_DIR}/reliability-failure-drill"
 EXPECTED_OCCT_SOURCE_REPOSITORY='https://github.com/Open-Cascade-SAS/OCCT'
 EXPECTED_OCCT_SOURCE_COMMIT='c5f20409c52bf8f658314d205a0e5d6f0be0969c'
 EXPECTED_OCCT_WORKER_SCHEMA='threeterm.workers.occt/1'
@@ -58,8 +59,8 @@ rm -f -- "${COVERAGE_ROOT}/api-journey-coverage.json" \
     "${COVERAGE_ROOT}/journey-coverage-matrix.json"
 THREETERM_COVERAGE_EVIDENCE_ROOT="${COVERAGE_ROOT}"
 
-readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE COVERAGE_ROOT JOURNEY_EVIDENCE MATRIX_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
-export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE COVERAGE_ROOT THREETERM_COVERAGE_EVIDENCE_ROOT
+readonly CATALOG LOG_ROOT NATIVE_MANIFEST LIBSLVS_ARTIFACT ARTIFACT_MANIFEST_RELATIVE SCHEMA_PROJECT SCHEMA_RESPONSE OCCT_SMOKE_EVIDENCE COVERAGE_ROOT JOURNEY_EVIDENCE MATRIX_EVIDENCE RELIABILITY_EVIDENCE EXPECTED_OCCT_SOURCE_REPOSITORY EXPECTED_OCCT_SOURCE_COMMIT EXPECTED_OCCT_WORKER_SCHEMA EXPECTED_PROTOCOL_SCHEMA GATE_TIMEOUT_SECONDS GATE_KILL_GRACE_SECONDS
+export ROOT SOURCE_COMMIT SOURCE_CLEAN LIBSLVS_ARTIFACT SCHEMA_PROJECT SCHEMA_RESPONSE COVERAGE_ROOT THREETERM_COVERAGE_EVIDENCE_ROOT RELIABILITY_EVIDENCE
 
 SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null || printf '%s' unknown)"
 SOURCE_CLEAN=true
@@ -422,6 +423,25 @@ THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 cargo test -p threeterm
             --jobs 1 -- --include-ignored --exact --test-threads=1
     '
 
+run_gate reliability.failure-drill \
+    'reliability.failure-drill: THREETERM_RELIABILITY_EVIDENCE_ROOT=target/acceptance-run/reliability-failure-drill cargo test -p rehearsal --test reliability_failure_drill reliability_failure_drill_isolation_bounded_cleanup_and_retained_evidence --jobs 1 -- --exact --test-threads=1' \
+    bash -e -u -o pipefail -c '
+        rm -rf -- "${RELIABILITY_EVIDENCE}"
+        THREETERM_RELIABILITY_EVIDENCE_ROOT="${RELIABILITY_EVIDENCE}" \
+            cargo test -p rehearsal --test reliability_failure_drill \
+            reliability_failure_drill_isolation_bounded_cleanup_and_retained_evidence \
+            --jobs 1 -- --exact --test-threads=1
+        for root in "${RELIABILITY_EVIDENCE}/reliability-first" "${RELIABILITY_EVIDENCE}/reliability-second"; do
+            test -f "${root}/evidence/report.json"
+            test -f "${root}/artifacts/manifest.json"
+            jq -e ".test == \"reliability.failure_drill_isolation_bounded_cleanup_and_retained_evidence\" and
+                .cleanup.forced == true and
+                (.cleanup.remaining_processes | length == 0) and
+                .screenshots.status == \"not_applicable\"" \
+                "${root}/evidence/report.json" >/dev/null
+        done
+    '
+
 run_gate registry.command-schemas \
     'cargo test -p threeterm-protocol --test registry_shape --test registry_hash --test registry_bracket --jobs 1 -- --test-threads=1
 cargo test -p threeterm-mcp --test mcp_bracket tools_list_advertises_every_registered_command_with_populated_schemas --jobs 1 -- --exact --test-threads=1' \
@@ -555,6 +575,9 @@ add_artifact "${LIBSLVS_ARTIFACT}/${ARTIFACT_MANIFEST_RELATIVE##*/}"
 add_artifact "${SCHEMA_RESPONSE}"
 add_artifact "${SCHEMA_PROJECT}/manifest.json"
 add_artifact "${SCHEMA_PROJECT}/transactions.log"
+while IFS= read -r -d '' artifact; do
+    add_artifact "${artifact}"
+done < <(find "${RELIABILITY_EVIDENCE}" -type f -print0 2>/dev/null || true)
 add_artifact "${ROOT}/README.md"
 add_artifact "${ROOT}/Cargo.toml"
 add_artifact "${ROOT}/Cargo.lock"

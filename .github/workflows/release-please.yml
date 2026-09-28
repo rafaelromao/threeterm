@@ -5,14 +5,18 @@ on:
     branches: [main]
 
 permissions:
-  actions: write
-  contents: write
-  pull-requests: write
+  actions: read
+  contents: read
+  pull-requests: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
     steps:
       - name: Check out the release automation scripts
         uses: actions/checkout@v4

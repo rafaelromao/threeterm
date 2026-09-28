@@ -51,9 +51,13 @@ release = YAML.load_file(root.join(".github/workflows/release-please.yml"), alia
 release_events = release.fetch(true)
 raise "release workflow must run on main pushes" unless release_events.dig("push", "branches") == ["main"]
 raise "release workflow must have a bounded timeout" unless release.dig("jobs", "release-please", "timeout-minutes") == 10
-raise "release workflow must write repository contents" unless release.dig("permissions", "contents") == "write"
-raise "release workflow must open pull requests" unless release.dig("permissions", "pull-requests") == "write"
-raise "release workflow must dispatch release E2E workflows" unless release.dig("permissions", "actions") == "write"
+raise "release workflow defaults must be read-only" unless
+  release.dig("permissions", "contents") == "read" &&
+  release.dig("permissions", "pull-requests") == "read" &&
+  release.dig("permissions", "actions") == "read"
+release_job_permissions = release.dig("jobs", "release-please", "permissions")
+raise "release job must have only its required write permissions" unless
+  release_job_permissions == {"actions" => "write", "contents" => "write", "pull-requests" => "write"}
 release_action = release.dig("jobs", "release-please", "steps").find do |step|
   step["uses"] == "googleapis/release-please-action@v4"
 end

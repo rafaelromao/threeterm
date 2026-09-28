@@ -6,7 +6,8 @@ TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION='empty-project'
 PERSISTED_TRANSIENT_SOURCE_REVISION='empty-session-source'
 TEST_ID='production_tui_ghostty_session'
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RECIPE_PATH="${THREETERM_THREE_JOURNEY_RECIPE:-${ROOT}/crates/host/tests/data/bracket_complete_recipe.v1.json}"
+RECIPE_PATH="${ROOT}/crates/host/tests/data/bracket_complete_recipe.v1.json"
+RECIPE_SHA256_EXPECTED='ad4eb9951dfab1352be1821c9f94df9b5e5b47b80e8c2bc2aaeebd4349f66319'
 RECIPE_SHA256=''
 TOOLCHAIN_CONTRACT="${THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT:-${ROOT}/.github/graphical-toolchain.env}"
 COMPOSITOR_WIDTH=800
@@ -476,10 +477,16 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         PROJECT_ROOT=''
     fi
 elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
-    [[ -f "$RECIPE_PATH" ]] && RECIPE_SHA256="$(sha256sum "$RECIPE_PATH" | cut -d' ' -f1)" || {
+    if [[ -f "$RECIPE_PATH" ]]; then
+        RECIPE_SHA256="$(sha256sum "$RECIPE_PATH" | cut -d' ' -f1)"
+        if [[ "$RECIPE_SHA256" != "$RECIPE_SHA256_EXPECTED" ]]; then
+            path_failure_code='recipe_digest_mismatch'
+            path_failure_detail="shared recipe digest differs from the approved version: $RECIPE_PATH"
+        fi
+    else
         path_failure_code='recipe_unavailable'
         path_failure_detail="shared recipe is not a regular file: $RECIPE_PATH"
-    }
+    fi
     coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
     TOOL_COVERAGE_LOG="${coverage_root}/tool-coverage.jsonl"
     mkdir -p "$coverage_root"

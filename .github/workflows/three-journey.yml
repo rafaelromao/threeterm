@@ -20,6 +20,8 @@ jobs:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           startsWith(github.head_ref, 'release-please--branches--') &&
            contains(github.event.pull_request.labels.*.name, 'autorelease: pending')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -104,9 +106,9 @@ jobs:
       ${{ always() &&
           (github.event_name == 'workflow_dispatch' ||
            (github.event_name == 'pull_request' &&
-            contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) &&
-          (github.event_name != 'pull_request' ||
-           github.event.pull_request.head.repo.full_name == github.repository) }}
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.head_ref, 'release-please--branches--') &&
+            contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) }}
     runs-on: [self-hosted, linux, x64, threeterm-graphical]
     timeout-minutes: 60
     steps:
@@ -169,6 +171,8 @@ jobs:
       ${{ always() &&
           (github.event_name == 'workflow_dispatch' ||
            (github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            startsWith(github.head_ref, 'release-please--branches--') &&
             contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 80

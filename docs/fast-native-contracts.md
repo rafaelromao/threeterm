@@ -19,6 +19,9 @@ process/protocol evidence, solver output, and supply-chain/release gates.
 - Structured worker failure: a `brep_invalid` fixture failure reaches the CLI
   diagnostic, preserves `manifest.json` and `transactions.log`, and creates
   no Derived Result.
+- CLI shell canonical intent persistence, source Revision Snapshot and base
+  dependency binding, promoted artifact provenance, and fixture-backed replay
+  without canonical-state changes (`crates/cli/tests/fast_native_contracts.rs`).
 - Exact canonical identity wins over a legacy `*-base` role, including after
   bundle reload (`crates/persistence/tests/history.rs`).
 - Already fast before this change: transform request validation, missing-base
@@ -40,10 +43,9 @@ process/protocol evidence, solver output, and supply-chain/release gates.
   authorization, licensing/source-offer, performance evidence, and
   tamper-evident bundles. Reason: supply-chain, release, and performance
   gates by design.
-- Shell/finishing replay with real geometry, including CLI shell intent
-  persistence. Reason: uncovered production defect filed as #522; the fixture
-  tracer proved the commit path but replay needs the canonical intent fix
-  before a fast regression can be meaningful.
+- Physical shell/finishing geometry and real-worker replay. Reason: topology,
+  tessellation, and pinned Geometric Kernel behavior require native OCCT;
+  canonical shell persistence and fixture-backed replay are covered above.
 - Worker-derived edge provenance through real inspection. Reason: existing
   fast tests cover incompatible evidence and validation, but selected-edge
   serialization against real topology still needs OCCT inspection.

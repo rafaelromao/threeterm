@@ -81,7 +81,11 @@ staging_name=$(field staging_name)
 semantic_input_sha256=$(field semantic_input_sha256)
 deterministic_settings_sha256=$(field deterministic_settings_sha256)
 mkdir -p "$output_dir"
-artifact="$output_dir/$staging_name.partial"
+if [ -n "$staging_name" ]; then
+  artifact="$output_dir/$staging_name.partial"
+else
+  artifact="$output_dir/$output_filename"
+fi
 printf 'DBRep_DrawableShape fixture:%s:%s' "$operation" "$feature_id" > "$artifact"
 bytes=$(wc -c < "$artifact" | tr -d ' ')
 digest=$(sha256sum "$artifact" | cut -d ' ' -f1)

@@ -83,6 +83,7 @@ const LAYER1_CACHE_SCHEMA: &str = "threeterm.host.layer1-cache/1";
 
 pub mod bracket_equivalence;
 pub mod bracket_oracle;
+pub mod journey_gate;
 pub mod stl_integrity;
 
 struct ThreeMfBody {

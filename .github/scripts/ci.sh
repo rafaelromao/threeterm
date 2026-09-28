@@ -44,6 +44,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "==> test-suite selector contract"
 bash tests/test-test-suite.sh
 
+echo "==> three-journey gate contract"
+bash tests/three-journey-gate.sh
+
 echo "==> graphical runner contract"
 bash tests/graphical-runner-contract.sh
 

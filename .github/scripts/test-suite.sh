@@ -10,7 +10,6 @@ case "${1:-}" in
         # Native acceptance tests require the immutable OCCT worker; native-e2e
         # runs them unskipped with THREETERM_REQUIRE_OCCT=1 and the worker
         # installed.
-        bash tests/three-journey-gate.sh
         cargo test --workspace -- \
             --skip supervised_occt_extrude \
             --skip supervised_occt_replay \

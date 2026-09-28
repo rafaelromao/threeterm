@@ -97,9 +97,9 @@ Load and save behavior is fail-closed:
 The Rust host owns lifecycle, document state, command validation, persistence, and
 worker process boundaries. C++ implementation details never cross the protocol.
 
-- One disposable version-pinned OCCT worker handles each geometry request.
-- One disposable version-pinned SolveSpace `libslvs` worker handles each sketch
-  solve request under its declared GPLv3 or commercial licensing path.
+- One disposable version-pinned C++ OCCT worker handles each geometry request.
+- One disposable version-pinned C++ SolveSpace `libslvs` worker handles each
+  sketch solve request under its declared GPLv3 or commercial licensing path.
 - Startup negotiates the versioned newline-framed worker protocol. Workers expose
   structured messages and staged artifacts, never native pointers, handles, or
   mutable object identity.
@@ -237,21 +237,21 @@ blocked until the signed trademark and namespace gate passes through
 
 ## Module and Work Map
 
-| Contract area | Workspace owner | Boundary |
-|---|---|---|
-| Canonical graph and components | `crates/domain` | stable semantic IDs, sketches, references, history model |
-| Persistence and recovery | `crates/persistence` | sealed manifest, NDJSON log, migration, generations |
-| Command registry and protocol | `crates/protocol` | versioned schemas, framing, validation, supervision |
-| Host execution | `crates/host` | snapshots, workers, derived-result promotion, export |
-| OCCT worker boundary | `crates/workers/occt` | disposable geometry and artifact protocol |
-| libslvs worker boundary | `crates/workers/slvs` | disposable sketch solving and diagnostics |
-| Direct-Ghostty TUI | `crates/tui` | keyboard state, command palette, capability routing |
-| Headless CLI | `crates/cli` | machine-readable adapter over the shared command API |
-| MCP | `crates/mcp` | JSON-RPC/MCP adapter over the shared command API |
-| Viewport | `crates/viewport` | projection, Kitty frames, cache and coalescing |
-| Themes | `crates/theme` | embedded palette resolution and diagnostics |
-| Lua boundary | `crates/lua-bridge` | restricted keymap and registered-command bridge |
-| Rehearsal | `crates/rehearsal` | L-bracket evidence and release-candidate comparison |
+| Contract area | Workspace owner | Boundary | Status |
+|---|---|---|---|
+| Canonical graph and components | `crates/domain` | stable semantic IDs, sketches, references, history model | Implemented; crate tests cover the boundary |
+| Persistence and recovery | `crates/persistence` | sealed manifest, NDJSON log, migration, generations | Implemented; crate tests cover the boundary |
+| Command registry and protocol | `crates/protocol` | versioned schemas, framing, validation, supervision | Implemented; crate tests cover the boundary |
+| Host execution | `crates/host` | snapshots, workers, derived-result promotion, export | Implemented; host tests cover the boundary |
+| OCCT worker boundary | `crates/workers/occt` | disposable C++ geometry and artifact protocol | Implemented; native tests remain environment-gated |
+| libslvs worker boundary | `crates/workers/slvs` | disposable C++ sketch solving and diagnostics | Implemented; native tests remain environment-gated |
+| Direct-Ghostty TUI | `crates/tui` | keyboard state, command palette, capability routing | Implemented; graphical tests remain environment-gated |
+| Headless CLI | `crates/cli` | machine-readable adapter over the shared command API | Implemented; adapter tests cover the boundary |
+| MCP | `crates/mcp` | JSON-RPC/MCP adapter over the shared command API | Implemented; adapter tests cover the boundary |
+| Viewport | `crates/viewport` | projection, Kitty frames, cache and coalescing | Implemented; renderer tests cover the boundary |
+| Themes | `crates/theme` | embedded palette resolution and diagnostics | Implemented; palette tests cover the boundary |
+| Lua boundary | `crates/lua-bridge` | restricted keymap and registered-command bridge | Implemented; bridge tests cover the boundary |
+| Rehearsal | `crates/rehearsal` | L-bracket evidence and release-candidate comparison | Implemented; rehearsal tests cover the boundary |
 
 Implementation order follows the closed child-spec bands: f1 foundation, f2
 interactive core, f3 feature depth, then f4 rehearsal and polish. Within an area,

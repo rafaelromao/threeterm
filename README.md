@@ -2,8 +2,10 @@
 
 ThreeTerm is a Linux terminal-native parametric CAD product for designing
 functional parts for 3D printing. This repository hosts the Rust implementation
-of the ThreeTerm MVP. The architecture and product specification are recorded
-in issue #58; this README documents the current module map.
+of the ThreeTerm MVP. The implementation-facing contract is recorded in
+[`docs/mvp-implementation-specification.md`](docs/mvp-implementation-specification.md),
+with issue #58 retained as planning provenance. This README documents the current
+module map and verification commands.
 
 ## Module map
 

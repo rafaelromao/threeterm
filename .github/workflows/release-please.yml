@@ -5,6 +5,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -12,8 +13,16 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out the release automation scripts
+        uses: actions/checkout@v4
+
       - name: Create or update the release pull request
         uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Dispatch E2E workflows for the release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/dispatch-release-e2e.sh

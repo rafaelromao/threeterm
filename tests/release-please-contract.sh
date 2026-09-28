@@ -19,6 +19,7 @@ package = config["packages"]["."]
 assert package["release-type"] == "simple"
 assert package["package-name"] == "threeterm"
 assert package["changelog-path"] == "CHANGELOG.md"
+assert config["pull-request-title-pattern"] == "chore: release ${version}"
 assert manifest == {".": "0.1.0"}
 assert (root / "version.txt").read_text().strip() == manifest["."]
 assert workspace["workspace"]["package"]["version"] == manifest["."]
@@ -50,12 +51,23 @@ release_events = release.fetch(true)
 raise "release workflow must run on main pushes" unless release_events.dig("push", "branches") == ["main"]
 raise "release workflow must write repository contents" unless release.dig("permissions", "contents") == "write"
 raise "release workflow must open pull requests" unless release.dig("permissions", "pull-requests") == "write"
+raise "release workflow must dispatch release E2E workflows" unless release.dig("permissions", "actions") == "write"
 release_action = release.dig("jobs", "release-please", "steps").find do |step|
   step["uses"] == "googleapis/release-please-action@v4"
 end
 raise "release-please action/config is missing" unless release_action &&
   release_action.dig("with", "config-file") == "release-please-config.json" &&
   release_action.dig("with", "manifest-file") == ".release-please-manifest.json"
+dispatch_step = release.dig("jobs", "release-please", "steps").find do |step|
+  step["run"].to_s.include?("dispatch-release-e2e.sh")
+end
+raise "release PR E2E dispatch step is missing" unless dispatch_step && dispatch_step.dig("env", "GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}"
+checkout_index = release.dig("jobs", "release-please", "steps").index do |step|
+  step["uses"] == "actions/checkout@v4"
+end
+dispatch_index = release.dig("jobs", "release-please", "steps").index(dispatch_step)
+raise "release workflow must check out the dispatcher script before running it" unless
+  checkout_index && dispatch_index && checkout_index < dispatch_index
 
 semantic = YAML.load_file(root.join(".github/workflows/semantic-pull-request.yml"), aliases: true)
 semantic_events = semantic.fetch(true)

@@ -59,6 +59,9 @@ bash .github/scripts/test-suite.sh fast
 # Run only the opt-in slow tests
 bash .github/scripts/test-suite.sh slow
 
+# Run the complete native E2E suite, including ignored tests
+bash .github/scripts/e2e.sh
+
 # Run the commit-bound production conformance catalog. The command runs every
 # required workflow, replay, registry, worker, licensing, release,
 # documentation, and performance gate. It always writes
@@ -215,6 +218,14 @@ source-built OCCT/libslvs workers. Its native acceptance catalog and complete
 ignored E2E suite run only for a Release Please pull request carrying the
 `autorelease: pending` label, or when manually dispatched. The full suite is
 run through `.github/scripts/e2e.sh`; ordinary feature PRs run only fast CI.
+Release Please dispatches both native E2E workflows at the release branch after
+updating the PR, because its `GITHUB_TOKEN` cannot trigger follow-up PR events.
+Maintainers can also run the workflows manually:
+
+```sh
+gh workflow run e2e.yml --ref main -f expected_catalog_result=failed
+gh workflow run three-journey.yml --ref main
+```
 
 `.github/workflows/release-please.yml` opens or updates the release PR after
 commits reach `main`. `.github/workflows/semantic-pull-request.yml` validates

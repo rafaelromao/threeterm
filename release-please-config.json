@@ -1,0 +1,25 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "threeterm",
+      "component": "threeterm",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name == 'rehearsal' || @.name == 'threeterm-cli' || @.name == 'threeterm-domain' || @.name == 'threeterm-host' || @.name == 'threeterm-lua-bridge' || @.name == 'threeterm-mcp' || @.name == 'threeterm-occt-worker' || @.name == 'threeterm-persistence' || @.name == 'threeterm-protocol' || @.name == 'threeterm-slvs-worker' || @.name == 'threeterm-theme' || @.name == 'threeterm-tui' || @.name == 'threeterm-viewport')].version"
+        }
+      ]
+    }
+  },
+  "include-component-in-tag": false,
+  "include-v-in-tags": true,
+  "pull-request-title-pattern": "chore: release ${component} ${version}"
+}

@@ -1,0 +1,30 @@
+name: semantic-pull-request
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  semantic-pull-request:
+    name: Conventional Commit pull request title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate the pull request title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            build
+            ci
+            chore
+            test
+            revert

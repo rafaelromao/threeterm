@@ -76,48 +76,42 @@ fn recipe_request_mismatch(stage: &Value, step: &Value) -> Result<(), String> {
             .remove("selected_edge")
             .ok_or_else(|| "finishing step has no selected edge".to_string())?;
         let edge_selection = &step["edge_selection"];
-        for (actual_value, expected_value, name) in [
-            (
-                &selected_edge["role"],
-                &edge_selection["role"],
-                "selected edge role",
-            ),
-            (
-                &selected_edge["evidence"]["midpoint"],
-                &edge_selection["midpoint"],
-                "selected edge midpoint",
-            ),
-            (
-                &selected_edge["evidence"]["tangent"],
-                &edge_selection["tangent"],
-                "selected edge tangent",
-            ),
-            (
-                &selected_edge["evidence"]["length"],
-                &edge_selection["length"],
-                "selected edge length",
-            ),
-            (
-                &selected_edge["provenance"]["source_feature_id"],
-                &step["request"]["base_feature_id"],
-                "selected edge source feature",
-            ),
-            (
-                &selected_edge["provenance"]["source_edge_id"],
-                &edge_selection["source_edge_id"],
-                "selected edge source edge",
-            ),
-        ] {
-            if actual_value != expected_value {
-                return Err(format!("{name} differs"));
+        let midpoint: [f64; 3] = serde_json::from_value(edge_selection["midpoint"].clone())
+            .map_err(|error| format!("selected edge midpoint is invalid: {error}"))?;
+        let tangent: [f64; 3] = serde_json::from_value(edge_selection["tangent"].clone())
+            .map_err(|error| format!("selected edge tangent is invalid: {error}"))?;
+        let length = edge_selection["length"]
+            .as_f64()
+            .ok_or_else(|| "selected edge length is invalid".to_string())?;
+        let semantic_id = format!(
+            "edge-{}",
+            sha256_hex(
+                &serde_json::to_vec(&(midpoint, tangent, length))
+                    .map_err(|error| format!("selected edge evidence is invalid: {error}"))?,
+            )
+        );
+        let source_revision_id = selected_edge["provenance"]["source_revision_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "selected edge is missing runtime provenance".to_string())?;
+        let expected_edge = json!({
+            "semantic_id": semantic_id,
+            "provenance": {
+                "source_feature_id": step["request"]["base_feature_id"],
+                "source_revision_id": source_revision_id,
+                "source_edge_id": edge_selection["source_edge_id"]
+            },
+            "role": edge_selection["role"],
+            "evidence": {
+                "midpoint": midpoint,
+                "tangent": tangent,
+                "length": length
             }
-        }
-        if selected_edge["semantic_id"].as_str().is_none()
-            || selected_edge["provenance"]["source_revision_id"]
-                .as_str()
-                .is_none()
-        {
-            return Err("selected edge is missing runtime provenance".to_string());
+        });
+        if selected_edge != expected_edge {
+            return Err(format!(
+                "selected edge differs: actual={selected_edge} expected={expected_edge}"
+            ));
         }
     }
 
@@ -156,17 +150,15 @@ fn finishing_transcript_stage(request: Value) -> Value {
     })
 }
 
-#[test]
-fn tui_recipe_request_comparison_preserves_semantic_edge_evidence() {
-    let step = finishing_recipe_step();
-    let request = json!({
+fn finishing_request() -> Value {
+    let semantic_input = serde_json::to_vec(&([30.0, 4.0, 0.0], [1.0, 0.0, 0.0], 12.0))
+        .expect("finishing edge evidence serializes");
+    json!({
         "feature_id": "pad-a",
         "base_feature_id": "pad-a-seed",
         "radius": 0.5,
-        "bundle_path": "/tmp/project",
-        "expected_revision": "revision",
         "selected_edge": {
-            "semantic_id": "edge-runtime",
+            "semantic_id": format!("edge-{}", sha256_hex(&semantic_input)),
             "provenance": {
                 "source_feature_id": "pad-a-seed",
                 "source_revision_id": "revision",
@@ -179,9 +171,25 @@ fn tui_recipe_request_comparison_preserves_semantic_edge_evidence() {
                 "length": 12.0
             }
         }
-    });
+    })
+}
+
+#[test]
+fn tui_recipe_request_comparison_preserves_semantic_edge_evidence() {
+    let step = finishing_recipe_step();
+    let mut request = finishing_request();
+    request["bundle_path"] = json!("/tmp/project");
+    request["expected_revision"] = json!("revision");
     recipe_request_mismatch(&finishing_transcript_stage(request), &step)
-        .expect("runtime provenance is the only ignored request variation");
+        .expect("only bundle path and revision provenance are runtime values");
+}
+
+#[test]
+fn tui_recipe_request_comparison_rejects_unexpected_edge_evidence() {
+    let step = finishing_recipe_step();
+    let mut request = finishing_request();
+    request["selected_edge"]["evidence"]["unexpected"] = json!(true);
+    assert!(recipe_request_mismatch(&finishing_transcript_stage(request), &step).is_err());
 }
 
 #[test]

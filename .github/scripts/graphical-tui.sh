@@ -1893,12 +1893,13 @@ all_tools_recipe_request() {
 
 all_tools_recipe_edge() {
     local feature_id="$1"
-    local step base_feature source_edge midpoint tangent length revision semantic_input semantic_id
+    local step base_feature source_edge role midpoint tangent length revision semantic_input semantic_id
     step="$(jq -ce --arg feature_id "$feature_id" \
         '.steps[] | select(.feature_id == $feature_id)' "$RECIPE_PATH")" ||
         die recipe_step_missing "shared recipe has no edge selection for ${feature_id}"
     base_feature="$(jq -er '.request.base_feature_id' <<<"$step")"
     source_edge="$(jq -er '.edge_selection.source_edge_id' <<<"$step")"
+    role="$(jq -er '.edge_selection.role' <<<"$step")"
     midpoint="$(jq -ce '.edge_selection.midpoint' <<<"$step")"
     tangent="$(jq -ce '.edge_selection.tangent' <<<"$step")"
     length="$(jq -er '.edge_selection.length' <<<"$step")"
@@ -1911,11 +1912,12 @@ all_tools_recipe_edge() {
         --arg base "$base_feature" \
         --arg revision "$revision" \
         --arg source_edge "$source_edge" \
+        --arg role "$role" \
         --arg semantic_id "edge-$semantic_id" \
         --argjson midpoint "$midpoint" \
         --argjson tangent "$tangent" \
         --argjson length "$length" \
-        '{semantic_id:$semantic_id,provenance:{source_feature_id:$base,source_revision_id:$revision,source_edge_id:$source_edge},role:"outer-perimeter",evidence:{midpoint:$midpoint,tangent:$tangent,length:$length}}'
+        '{semantic_id:$semantic_id,provenance:{source_feature_id:$base,source_revision_id:$revision,source_edge_id:$source_edge},role:$role,evidence:{midpoint:$midpoint,tangent:$tangent,length:$length}}'
 }
 
 bracket_viewport_ready() {

@@ -6,6 +6,8 @@ TRANSIENT_EMPTY_PROJECT_SOURCE_REVISION='empty-project'
 PERSISTED_TRANSIENT_SOURCE_REVISION='empty-session-source'
 TEST_ID='production_tui_ghostty_session'
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RECIPE_PATH="${THREETERM_THREE_JOURNEY_RECIPE:-${ROOT}/crates/host/tests/data/bracket_complete_recipe.v1.json}"
+RECIPE_SHA256=''
 TOOLCHAIN_CONTRACT="${THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT:-${ROOT}/.github/graphical-toolchain.env}"
 COMPOSITOR_WIDTH=800
 COMPOSITOR_HEIGHT=600
@@ -474,6 +476,10 @@ if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ]]; then
         PROJECT_ROOT=''
     fi
 elif [[ "$TEST_ID" == 'production_tui_all_tools_stl_journey' ]]; then
+    [[ -f "$RECIPE_PATH" ]] && RECIPE_SHA256="$(sha256sum "$RECIPE_PATH" | cut -d' ' -f1)" || {
+        path_failure_code='recipe_unavailable'
+        path_failure_detail="shared recipe is not a regular file: $RECIPE_PATH"
+    }
     coverage_root="${THREETERM_COVERAGE_EVIDENCE_ROOT:-${CARGO_TARGET_DIR:-${ROOT}/target}/journey-coverage}"
     TOOL_COVERAGE_LOG="${coverage_root}/tool-coverage.jsonl"
     mkdir -p "$coverage_root"
@@ -632,12 +638,14 @@ json_escape_minimal() {
 }
 
 write_minimal_manifest() {
-    local escaped_code escaped_detail
+    local escaped_code escaped_detail escaped_recipe_path
     escaped_code="$(json_escape_minimal "${failure_code:-runner_failure}")"
     escaped_detail="$(json_escape_minimal "${failure_detail:-graphical runner failed}")"
-    printf '{"schema_version":"%s","result":"failed","test":"%s","integrity":"unavailable","configuration":{"locale":"%s","compositor":{"width":%d,"height":%d},"terminal":{"columns":%d,"rows":%d},"viewport_crop":"%s"},"failure":{"code":"%s","detail":"%s"},"artifacts":[]}\n' \
-        "$SCHEMA_VERSION" "$TEST_ID" "$LOCALE" "$COMPOSITOR_WIDTH" "$COMPOSITOR_HEIGHT" \
-        "$TERMINAL_COLUMNS" "$TERMINAL_ROWS" "$VIEWPORT_CROP" "$escaped_code" "$escaped_detail" \
+    escaped_recipe_path="$(json_escape_minimal "$RECIPE_PATH")"
+    printf '{"schema_version":"%s","result":"failed","test":"%s","recipe":{"path":"%s","file_sha256":"%s"},"integrity":"unavailable","configuration":{"locale":"%s","compositor":{"width":%d,"height":%d},"terminal":{"columns":%d,"rows":%d},"viewport_crop":"%s"},"failure":{"code":"%s","detail":"%s"},"artifacts":[]}\n' \
+        "$SCHEMA_VERSION" "$TEST_ID" "$escaped_recipe_path" "$RECIPE_SHA256" "$LOCALE" \
+        "$COMPOSITOR_WIDTH" "$COMPOSITOR_HEIGHT" "$TERMINAL_COLUMNS" "$TERMINAL_ROWS" \
+        "$VIEWPORT_CROP" "$escaped_code" "$escaped_detail" \
         >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
 }
 
@@ -1876,6 +1884,40 @@ bracket_edge_reference() {
         '{semantic_id:$semantic_id,provenance:{source_feature_id:$base,source_revision_id:$revision,source_edge_id:$source_edge},role:"outer-perimeter",evidence:{midpoint:$midpoint,tangent:[1.0,0.0,0.0],length:12.0}}'
 }
 
+all_tools_recipe_request() {
+    local feature_id="$1"
+    jq -ce --arg feature_id "$feature_id" \
+        '.steps[] | select(.feature_id == $feature_id) | .request' \
+        "$RECIPE_PATH" || die recipe_step_missing "shared recipe has no request for ${feature_id}"
+}
+
+all_tools_recipe_edge() {
+    local feature_id="$1"
+    local step base_feature source_edge midpoint tangent length revision semantic_input semantic_id
+    step="$(jq -ce --arg feature_id "$feature_id" \
+        '.steps[] | select(.feature_id == $feature_id)' "$RECIPE_PATH")" ||
+        die recipe_step_missing "shared recipe has no edge selection for ${feature_id}"
+    base_feature="$(jq -er '.request.base_feature_id' <<<"$step")"
+    source_edge="$(jq -er '.edge_selection.source_edge_id' <<<"$step")"
+    midpoint="$(jq -ce '.edge_selection.midpoint' <<<"$step")"
+    tangent="$(jq -ce '.edge_selection.tangent' <<<"$step")"
+    length="$(jq -er '.edge_selection.length' <<<"$step")"
+    revision="$(jq -er '.revision_hash' "$PROJECT_ROOT/manifest.json")"
+    semantic_input="$(jq -cn \
+        --argjson midpoint "$midpoint" --argjson tangent "$tangent" --argjson length "$length" \
+        '[$midpoint,$tangent,$length]')"
+    semantic_id="$(printf '%s' "$semantic_input" | sha256sum | cut -d' ' -f1)"
+    jq -cn \
+        --arg base "$base_feature" \
+        --arg revision "$revision" \
+        --arg source_edge "$source_edge" \
+        --arg semantic_id "edge-$semantic_id" \
+        --argjson midpoint "$midpoint" \
+        --argjson tangent "$tangent" \
+        --argjson length "$length" \
+        '{semantic_id:$semantic_id,provenance:{source_feature_id:$base,source_revision_id:$revision,source_edge_id:$source_edge},role:"outer-perimeter",evidence:{midpoint:$midpoint,tangent:$tangent,length:$length}}'
+}
+
 bracket_viewport_ready() {
     local expected_feature="$1"
     extract_viewport_evidence || return 1
@@ -2174,37 +2216,40 @@ run_all_tools_journey() {
     BRACKET_TRANSCRIPT="$saved_bracket_transcript"
     BRACKET_STEPS_DIR="$saved_bracket_steps"
     all_tools_model_step arm-x extrude arm-x \
-        '{"feature_id":"arm-x","profile":[[0.0,0.0],[60.0,0.0],[60.0,20.0],[0.0,20.0]],"height":8.0,"mode":"additive"}'
+        "$(all_tools_recipe_request arm-x)"
     all_tools_model_step arm-z extrude arm-z \
-        '{"feature_id":"arm-z","profile":[[0.0,0.0],[20.0,0.0],[20.0,60.0],[0.0,60.0]],"height":8.0,"mode":"additive"}'
+        "$(all_tools_recipe_request arm-z)"
     all_tools_model_step pad-a-seed extrude pad-a-seed \
-        '{"feature_id":"pad-a-seed","profile":[[24.0,4.0],[36.0,4.0],[36.0,16.0],[24.0,16.0]],"height":12.0,"mode":"additive"}'
-    local pad_a_edge pad_b_edge
-    pad_a_edge="$(bracket_edge_reference pad-a-seed pad-a-edge '[30.0,4.0,0.0]')"
+        "$(all_tools_recipe_request pad-a-seed)"
+    local pad_a_edge pad_b_edge pad_a_request pad_b_request
+    pad_a_edge="$(all_tools_recipe_edge pad-a)"
+    pad_a_request="$(all_tools_recipe_request pad-a)"
     all_tools_model_step pad-a fillet pad-a \
-        "$(jq -cn --argjson edge "$pad_a_edge" '{feature_id:"pad-a",base_feature_id:"pad-a-seed",radius:0.5,selected_edge:$edge}')"
+        "$(jq -cn --argjson request "$pad_a_request" --argjson edge "$pad_a_edge" '$request + {selected_edge:$edge}')"
     all_tools_model_step pad-b-seed extrude pad-b-seed \
-        '{"feature_id":"pad-b-seed","profile":[[4.0,24.0],[16.0,24.0],[16.0,36.0],[4.0,36.0]],"height":12.0,"mode":"additive"}'
-    pad_b_edge="$(bracket_edge_reference pad-b-seed pad-b-edge '[10.0,24.0,0.0]')"
+        "$(all_tools_recipe_request pad-b-seed)"
+    pad_b_edge="$(all_tools_recipe_edge pad-b)"
+    pad_b_request="$(all_tools_recipe_request pad-b)"
     all_tools_model_step pad-b chamfer pad-b \
-        "$(jq -cn --argjson edge "$pad_b_edge" '{feature_id:"pad-b",base_feature_id:"pad-b-seed",distance:0.25,selected_edge:$edge}')"
+        "$(jq -cn --argjson request "$pad_b_request" --argjson edge "$pad_b_edge" '$request + {selected_edge:$edge}')"
     all_tools_model_step bracket-l boolean-fuse bracket-l \
-        '{"feature_id":"bracket-l","base_feature_id":"arm-x","tool_feature_id":"arm-z"}'
+        "$(all_tools_recipe_request bracket-l)"
     all_tools_model_step bracket-lp1 boolean-fuse bracket-lp1 \
-        '{"feature_id":"bracket-lp1","base_feature_id":"bracket-l","tool_feature_id":"pad-a"}'
+        "$(all_tools_recipe_request bracket-lp1)"
     all_tools_model_step bracket-base boolean-fuse bracket-base \
-        '{"feature_id":"bracket-base","base_feature_id":"bracket-lp1","tool_feature_id":"pad-b"}'
+        "$(all_tools_recipe_request bracket-base)"
     all_tools_model_step bracket-hole-1 hole bracket-hole-1 \
-        '{"feature_id":"bracket-hole-1","base_feature_id":"bracket-base","position":[50.0,10.0,0.0],"direction":[0.0,0.0,1.0],"diameter":4.5,"hole_kind":"drilled"}'
+        "$(all_tools_recipe_request bracket-hole-1)"
     all_tools_model_step bracket-foundation hole bracket-foundation \
-        '{"feature_id":"bracket-foundation","base_feature_id":"bracket-hole-1","position":[10.0,50.0,0.0],"direction":[0.0,0.0,1.0],"diameter":4.5,"hole_kind":"drilled"}'
+        "$(all_tools_recipe_request bracket-foundation)"
     all_tools_save_step foundation-snapshot bracket-foundation \
-        '{"feature_id":"foundation-snapshot","kind":"checkpoint"}'
+        "$(all_tools_recipe_request foundation-snapshot)"
     local cancel_before_count cancel_before_revision cancel_before_digest
     cancel_before_count="$(jq -r '.transaction_count' "$PROJECT_ROOT/manifest.json")"
     cancel_before_revision="$(jq -r '.revision_hash' "$PROJECT_ROOT/manifest.json")"
     cancel_before_digest="$(project_generation_digest "$PROJECT_ROOT")"
-    local revolve_request='{"feature_id":"revolved-collar","profile":[[20.0,28.0],[22.0,28.0],[22.0,32.0],[20.0,32.0]],"axis_point":[10.0,0.0,0.0],"axis_direction":[0.0,-1.0,0.0],"angle":1.5707963267948966}'
+    local revolve_request
+    revolve_request="$(all_tools_recipe_request revolved-collar)"
     wtype -M ctrl -k p -m ctrl || die input_injection_failed 'could not open palette for canceled revolve'
     wtype revolve || die input_injection_failed 'could not type revolve for cancel'
     wtype -k Return || die input_injection_failed 'could not select revolve for cancel'
@@ -2223,47 +2268,47 @@ run_all_tools_journey() {
         die cancellation_mutated_project 'cancelled revolve preview created a BREP'
     ALL_TOOLS_CANCEL_REVISION="$cancel_before_revision"
     all_tools_model_step revolved-collar revolve revolved-collar \
-        '{"feature_id":"revolved-collar","profile":[[20.0,28.0],[22.0,28.0],[22.0,32.0],[20.0,32.0]],"axis_point":[10.0,0.0,0.0],"axis_direction":[0.0,-1.0,0.0],"angle":1.5707963267948966}'
+        "$revolve_request"
     all_tools_model_step hollow-detail-seed extrude hollow-detail-seed \
-        '{"feature_id":"hollow-detail-seed","profile":[[42.0,5.0],[52.0,5.0],[52.0,15.0],[42.0,15.0]],"height":20.0,"mode":"additive"}'
+        "$(all_tools_recipe_request hollow-detail-seed)"
     all_tools_model_step hollow-detail shell hollow-detail \
-        '{"feature_id":"hollow-detail","base_feature_id":"hollow-detail-seed","thickness":1.5}'
+        "$(all_tools_recipe_request hollow-detail)"
     all_tools_model_step hollow-detail-open hole hollow-detail-open \
-        '{"feature_id":"hollow-detail-open","base_feature_id":"hollow-detail","position":[47.0,10.0,0.0],"direction":[0.0,0.0,1.0],"diameter":5.0,"hole_kind":"drilled","measure_removed_volume":true}'
+        "$(all_tools_recipe_request hollow-detail-open)"
     all_tools_model_step foundation-with-collar boolean-fuse foundation-with-collar \
-        '{"feature_id":"foundation-with-collar","base_feature_id":"bracket-foundation","tool_feature_id":"revolved-collar"}'
+        "$(all_tools_recipe_request foundation-with-collar)"
     all_tools_model_step reinforced-foundation boolean-fuse reinforced-foundation \
-        '{"feature_id":"reinforced-foundation","base_feature_id":"foundation-with-collar","tool_feature_id":"hollow-detail-open"}'
+        "$(all_tools_recipe_request reinforced-foundation)"
     all_tools_save_step reinforcement-snapshot reinforced-foundation \
-        '{"feature_id":"reinforcement-snapshot","kind":"checkpoint"}'
+        "$(all_tools_recipe_request reinforcement-snapshot)"
     all_tools_model_step mirrored-collar mirror mirrored-collar \
-        '{"feature_id":"mirrored-collar","base_feature_id":"revolved-collar","plane_point":[0.0,0.0,0.0],"plane_normal":[1.0,-1.0,0.0]}'
+        "$(all_tools_recipe_request mirrored-collar)"
     all_tools_model_step foundation-with-mirrored-collar boolean-fuse foundation-with-mirrored-collar \
-        '{"feature_id":"foundation-with-mirrored-collar","base_feature_id":"reinforced-foundation","tool_feature_id":"mirrored-collar"}'
+        "$(all_tools_recipe_request foundation-with-mirrored-collar)"
     all_tools_model_step linear-pad-seed extrude linear-pad-seed \
-        '{"feature_id":"linear-pad-seed","profile":[[4.0,40.0],[12.0,40.0],[12.0,48.0],[4.0,48.0]],"height":12.0,"mode":"additive"}'
+        "$(all_tools_recipe_request linear-pad-seed)"
     all_tools_model_step linear-pads linear-pattern linear-pads \
-        '{"feature_id":"linear-pads","base_feature_id":"linear-pad-seed","direction":[0.0,1.0,0.0],"count":2,"spacing":12.0}'
+        "$(all_tools_recipe_request linear-pads)"
     all_tools_model_step foundation-with-linear-pads boolean-fuse foundation-with-linear-pads \
-        '{"feature_id":"foundation-with-linear-pads","base_feature_id":"foundation-with-mirrored-collar","tool_feature_id":"linear-pads"}'
+        "$(all_tools_recipe_request foundation-with-linear-pads)"
     all_tools_model_step circular-lug-seed extrude circular-lug-seed \
-        '{"feature_id":"circular-lug-seed","profile":[[43.0,16.0],[47.0,16.0],[47.0,20.0],[43.0,20.0]],"height":12.0,"mode":"additive"}'
+        "$(all_tools_recipe_request circular-lug-seed)"
     all_tools_model_step circular-lugs circular-pattern circular-lugs \
-        '{"feature_id":"circular-lugs","base_feature_id":"circular-lug-seed","axis_point":[47.0,10.0,0.0],"axis_normal":[0.0,0.0,1.0],"angle_step":2.0943951023931953,"count":3}'
+        "$(all_tools_recipe_request circular-lugs)"
     all_tools_model_step foundation-with-circular-lugs boolean-fuse foundation-with-circular-lugs \
-        '{"feature_id":"foundation-with-circular-lugs","base_feature_id":"foundation-with-linear-pads","tool_feature_id":"circular-lugs"}'
+        "$(all_tools_recipe_request foundation-with-circular-lugs)"
     all_tools_model_step taper-seed extrude taper-seed \
-        '{"feature_id":"taper-seed","profile":[[24.0,0.0],[34.0,0.0],[34.0,4.0],[24.0,4.0]],"height":12.0,"mode":"additive"}'
+        "$(all_tools_recipe_request taper-seed)"
     all_tools_model_step tapered-reinforcement draft tapered-reinforcement \
-        '{"feature_id":"tapered-reinforcement","base_feature_id":"taper-seed","angle":0.05235987755982989,"pull_direction":[0.0,0.0,1.0]}'
+        "$(all_tools_recipe_request tapered-reinforcement)"
     all_tools_model_step foundation-with-taper boolean-fuse foundation-with-taper \
-        '{"feature_id":"foundation-with-taper","base_feature_id":"foundation-with-circular-lugs","tool_feature_id":"tapered-reinforcement"}'
+        "$(all_tools_recipe_request foundation-with-taper)"
     all_tools_model_step lofted-gusset loft lofted-gusset \
-        '{"feature_id":"lofted-gusset","profiles":[[[8.0,8.0,8.0],[16.0,8.0,8.0],[16.0,16.0,8.0],[8.0,16.0,8.0]],[[10.0,10.0,18.0],[14.0,10.0,18.0],[14.0,14.0,18.0],[10.0,14.0,18.0]]],"is_solid":true,"ruled":false}'
+        "$(all_tools_recipe_request lofted-gusset)"
     all_tools_model_step complete-bracket boolean-fuse complete-bracket \
-        '{"feature_id":"complete-bracket","base_feature_id":"foundation-with-taper","tool_feature_id":"lofted-gusset"}'
+        "$(all_tools_recipe_request complete-bracket)"
     all_tools_save_step complete-recipe-snapshot complete-bracket \
-        '{"feature_id":"complete-recipe-snapshot","kind":"checkpoint"}'
+        "$(all_tools_recipe_request complete-recipe-snapshot)"
     EXPECTED_FEATURE_ID='complete-bracket'
     viewport_workflow_evidence="$viewport_evidence"
     workflow_status='passed'
@@ -2530,6 +2575,8 @@ write_manifest() {
             --arg schema_version "$SCHEMA_VERSION" \
             --arg result "$result" \
             --arg test "$TEST_ID" \
+            --arg recipe_path "$RECIPE_PATH" \
+            --arg recipe_sha256 "$RECIPE_SHA256" \
             --arg source_commit "$source_commit" \
             --argjson source_dirty "$dirty_json" \
             --arg locale "$LOCALE" \
@@ -2578,7 +2625,7 @@ write_manifest() {
                --arg discovery_screenshot "$DISCOVERY_SCREENSHOT" \
                --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,discovery:$discovery_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir,discovery:$all_tools_discovery,discovery_screenshot:$discovery_screenshot}} else {} end)' \
+              '{schema_version:$schema_version,result:$result,test:$test,recipe:{path:$recipe_path,file_sha256:$recipe_sha256},source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,discovery:$discovery_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir,discovery:$all_tools_discovery,discovery_screenshot:$discovery_screenshot}} else {} end)' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest

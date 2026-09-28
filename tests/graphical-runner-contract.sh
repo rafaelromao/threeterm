@@ -118,6 +118,11 @@ for required in \
     'threeterm.graphical-tui.mirror-pattern-reinforcing-features/1' \
     'threeterm.graphical-tui.tapered-lofted-reinforcements/1' \
     'threeterm.graphical-tui.all-tools-stl-journey/1' \
+    'RECIPE_PATH' \
+    'RECIPE_SHA256' \
+    'all_tools_recipe_request' \
+    'recipe_unavailable' \
+    'file_sha256' \
     'empty-startup.png' \
     'project-created.png' \
     'extrusion-committed.png' \

@@ -9,6 +9,9 @@ use threeterm_host::bracket_equivalence::{
     JourneyMetadata, configured_run_id, current_source_identity, evidence_root,
     new_journey_evidence_report, publish_journey_evidence_report,
 };
+use threeterm_host::bracket_oracle::{
+    assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents,
+};
 use threeterm_host::{Host, stl_integrity};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
 use threeterm_persistence::{Bundle, CanonicalIntent, LogEntry};
@@ -40,6 +43,171 @@ fn positive_volume(solid: &SceneSolid) -> f64 {
         })
         .sum::<f64>()
         .abs()
+}
+
+fn recipe_request_mismatch(stage: &Value, step: &Value) -> Result<(), String> {
+    if stage["command"] != step["command"] {
+        return Err(format!(
+            "command differs: actual={} expected={}",
+            stage["command"], step["command"]
+        ));
+    }
+    if stage["feature_id"] != step["feature_id"] {
+        return Err(format!(
+            "feature ID differs: actual={} expected={}",
+            stage["feature_id"], step["feature_id"]
+        ));
+    }
+    let input = stage["input"]
+        .as_str()
+        .ok_or_else(|| "transcript input is not a JSON string".to_string())?;
+    let mut actual: Value = serde_json::from_str(input)
+        .map_err(|error| format!("transcript input is malformed JSON: {error}"))?;
+    let expected = step["request"].clone();
+    let actual_object = actual
+        .as_object_mut()
+        .ok_or_else(|| "transcript input is not an object".to_string())?;
+    for runtime_field in ["bundle_path", "expected_revision"] {
+        actual_object.remove(runtime_field);
+    }
+
+    if matches!(step["command"].as_str(), Some("fillet" | "chamfer")) {
+        let selected_edge = actual_object
+            .remove("selected_edge")
+            .ok_or_else(|| "finishing step has no selected edge".to_string())?;
+        let edge_selection = &step["edge_selection"];
+        for (actual_value, expected_value, name) in [
+            (
+                &selected_edge["role"],
+                &edge_selection["role"],
+                "selected edge role",
+            ),
+            (
+                &selected_edge["evidence"]["midpoint"],
+                &edge_selection["midpoint"],
+                "selected edge midpoint",
+            ),
+            (
+                &selected_edge["evidence"]["tangent"],
+                &edge_selection["tangent"],
+                "selected edge tangent",
+            ),
+            (
+                &selected_edge["evidence"]["length"],
+                &edge_selection["length"],
+                "selected edge length",
+            ),
+            (
+                &selected_edge["provenance"]["source_feature_id"],
+                &step["request"]["base_feature_id"],
+                "selected edge source feature",
+            ),
+            (
+                &selected_edge["provenance"]["source_edge_id"],
+                &edge_selection["source_edge_id"],
+                "selected edge source edge",
+            ),
+        ] {
+            if actual_value != expected_value {
+                return Err(format!("{name} differs"));
+            }
+        }
+        if selected_edge["semantic_id"].as_str().is_none()
+            || selected_edge["provenance"]["source_revision_id"]
+                .as_str()
+                .is_none()
+        {
+            return Err("selected edge is missing runtime provenance".to_string());
+        }
+    }
+
+    if actual != expected {
+        return Err(format!(
+            "recipe request differs: actual={actual} expected={expected}"
+        ));
+    }
+    Ok(())
+}
+
+fn finishing_recipe_step() -> Value {
+    json!({
+        "command": "fillet",
+        "feature_id": "pad-a",
+        "request": {
+            "feature_id": "pad-a",
+            "base_feature_id": "pad-a-seed",
+            "radius": 0.5
+        },
+        "edge_selection": {
+            "role": "outer-perimeter",
+            "midpoint": [30.0, 4.0, 0.0],
+            "tangent": [1.0, 0.0, 0.0],
+            "length": 12.0,
+            "source_edge_id": "pad-a-edge"
+        }
+    })
+}
+
+fn finishing_transcript_stage(request: Value) -> Value {
+    json!({
+        "command": "fillet",
+        "feature_id": "pad-a",
+        "input": request.to_string()
+    })
+}
+
+#[test]
+fn tui_recipe_request_comparison_preserves_semantic_edge_evidence() {
+    let step = finishing_recipe_step();
+    let request = json!({
+        "feature_id": "pad-a",
+        "base_feature_id": "pad-a-seed",
+        "radius": 0.5,
+        "bundle_path": "/tmp/project",
+        "expected_revision": "revision",
+        "selected_edge": {
+            "semantic_id": "edge-runtime",
+            "provenance": {
+                "source_feature_id": "pad-a-seed",
+                "source_revision_id": "revision",
+                "source_edge_id": "pad-a-edge"
+            },
+            "role": "outer-perimeter",
+            "evidence": {
+                "midpoint": [30.0, 4.0, 0.0],
+                "tangent": [1.0, 0.0, 0.0],
+                "length": 12.0
+            }
+        }
+    });
+    recipe_request_mismatch(&finishing_transcript_stage(request), &step)
+        .expect("runtime provenance is the only ignored request variation");
+}
+
+#[test]
+fn tui_recipe_request_comparison_rejects_parameter_and_step_drift() {
+    let step = finishing_recipe_step();
+    let mut request = finishing_transcript_stage(json!({
+        "feature_id": "pad-a",
+        "base_feature_id": "pad-a-seed",
+        "radius": 0.6
+    }));
+    assert!(recipe_request_mismatch(&request, &step).is_err());
+
+    request["command"] = Value::String("chamfer".to_string());
+    assert!(recipe_request_mismatch(&request, &step).is_err());
+
+    request["command"] = Value::String("fillet".to_string());
+    request["input"] = Value::String(
+        json!({
+            "feature_id": "pad-a",
+            "base_feature_id": "pad-a-seed",
+            "radius": 0.5,
+            "unexpected": true
+        })
+        .to_string(),
+    );
+    assert!(recipe_request_mismatch(&request, &step).is_err());
 }
 
 fn assert_authenticated_brep(root: &Path, entry: &LogEntry) {
@@ -1965,6 +2133,11 @@ fn production_tui_all_tools_stl_journey() {
     );
     assert_eq!(manifest["result"], "passed");
     assert_eq!(manifest["test"], "production_tui_all_tools_stl_journey");
+    assert_eq!(
+        manifest["recipe"]["file_sha256"],
+        sha256_hex(COMPLETE_RECIPE.as_bytes()),
+        "TUI evidence binds to the checked-in shared recipe"
+    );
     for event in [
         "discovery",
         "workflow",
@@ -2080,6 +2253,12 @@ fn production_tui_all_tools_stl_journey() {
     for (stage, step) in stages.iter().zip(recipe_steps) {
         assert_eq!(stage["command"], step["command"]);
         assert_eq!(stage["feature_id"], step["feature_id"]);
+        recipe_request_mismatch(stage, step).unwrap_or_else(|error| {
+            panic!(
+                "TUI transcript request differs for {}: {error}",
+                step["feature_id"]
+            )
+        });
         assert_eq!(stage["revision"], stage["commit_revision"]);
         assert_eq!(
             stage["revision"], stage["viewport_evidence"]["frame"]["revision"],
@@ -2121,6 +2300,8 @@ fn production_tui_all_tools_stl_journey() {
     let bundle = Bundle::at(&root)
         .open_read_only()
         .expect("finished bracket opens read-only");
+    assert_reinforcement_intents(&recipe, &bundle);
+    assert_complete_intents(&recipe, &bundle);
     assert_eq!(bundle.log.len(), 33);
     let feature_ids: Vec<_> = bundle
         .log
@@ -2137,6 +2318,12 @@ fn production_tui_all_tools_stl_journey() {
     let report = stl_integrity::verify_path(&export_stl)
         .expect("all-tools STL passes the shared independent oracle");
     let mesh = stl_integrity::observe_path(&export_stl).expect("STL observations parse");
+    assert_bracket_mesh(&recipe, &report, &mesh).unwrap_or_else(|failure| {
+        panic!(
+            "all-tools TUI STL failed the complete bracket oracle at {}: {failure}",
+            failure.landmark
+        )
+    });
     assert!(report.triangle_count > 0);
     assert_eq!(
         report.shell_count.saturating_sub(report.cavity_shell_count),

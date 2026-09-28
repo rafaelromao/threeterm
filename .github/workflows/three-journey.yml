@@ -3,6 +3,7 @@ name: three-journey-gate
 on:
   pull_request:
     branches: [main]
+    types: [opened, reopened, synchronize, labeled]
   workflow_dispatch:
 
 permissions:
@@ -16,6 +17,10 @@ env:
 jobs:
   headless:
     name: API and MCP journeys
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'autorelease: pending')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -95,7 +100,13 @@ jobs:
   tui:
     name: Qualified graphical TUI journey
     needs: headless
-    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: >-
+      ${{ always() &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'pull_request' &&
+            contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, threeterm-graphical]
     timeout-minutes: 60
     steps:
@@ -154,7 +165,11 @@ jobs:
   aggregate:
     name: Aggregate and publish evidence catalog
     needs: [headless]
-    if: ${{ always() }}
+    if: >-
+      ${{ always() &&
+          (github.event_name == 'workflow_dispatch' ||
+           (github.event_name == 'pull_request' &&
+            contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 80
     steps:

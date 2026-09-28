@@ -44,6 +44,54 @@ const REQUIRED_COMMANDS: &[&str] = &[
     "export",
 ];
 
+// This is the reviewed registry surface, not the all-tool recipe. Updating the
+// command registry requires an explicit coverage review before acceptance can pass.
+const REVIEWED_REGISTRY_COMMANDS: &[&str] = &[
+    "list",
+    "new-project",
+    "identity",
+    "apply",
+    "rehearse",
+    "save",
+    "load",
+    "bracket",
+    "define-component",
+    "create-component-instance",
+    "transform-component-instance",
+    "make-component-independent",
+    "edit-component-parameter",
+    "component-state",
+    "sketch-solve",
+    "bracket-edit",
+    "capture-component",
+    "historical-edit",
+    "create-revision",
+    "restore-revision",
+    "undo",
+    "redo",
+    "timeline",
+    "replay-verify",
+    "extrude",
+    "fit-dimension",
+    "boolean-fuse",
+    "boolean-cut",
+    "boolean-common",
+    "boolean-pattern",
+    "fillet",
+    "chamfer",
+    "reattach-edge",
+    "hole",
+    "revolve",
+    "mirror",
+    "linear-pattern",
+    "circular-pattern",
+    "shell",
+    "draft",
+    "loft",
+    "export",
+    "validate",
+];
+
 const JOURNEY_TEST_NAMES: [(Surface, &str); 3] = [
     (Surface::Api, "e2e_stl_api_all_tools_l_bracket"),
     (Surface::Mcp, "e2e_stl_mcp_all_tools_l_bracket"),
@@ -229,6 +277,10 @@ pub fn required_commands() -> &'static [&'static str] {
     REQUIRED_COMMANDS
 }
 
+pub fn reviewed_registry_commands() -> &'static [&'static str] {
+    REVIEWED_REGISTRY_COMMANDS
+}
+
 fn expected_journey_test(surface: Surface) -> &'static str {
     JOURNEY_TEST_NAMES
         .iter()
@@ -394,6 +446,37 @@ pub fn evaluate_with_registry(
     let mut cells = Vec::new();
     let mut raw_transport_methods = Vec::new();
     let mut ui_controls = Vec::new();
+
+    for surface in [Surface::Api, Surface::Mcp, Surface::Tui] {
+        for row in &current.rows {
+            if !REVIEWED_REGISTRY_COMMANDS.contains(&row.command_name.as_str()) {
+                push_delta(
+                    &mut deltas,
+                    surface,
+                    "unreviewed-registry-command",
+                    Some(&row.command_name),
+                    "checked-in reviewed command inventory",
+                    &compact(row),
+                );
+            }
+        }
+        for command_name in REVIEWED_REGISTRY_COMMANDS {
+            if !current
+                .rows
+                .iter()
+                .any(|row| row.command_name == *command_name)
+            {
+                push_delta(
+                    &mut deltas,
+                    surface,
+                    "reviewed-command-unregistered",
+                    Some(command_name),
+                    "registered command",
+                    "missing",
+                );
+            }
+        }
+    }
 
     for input in &inputs {
         let Some(report) = input.report.as_ref() else {

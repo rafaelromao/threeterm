@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use threeterm_protocol::coverage::{
     ExecutionEvidence, JourneyReport, RawTransportMethod, ReportInput, SourceIdentity, Surface,
-    UiControlEvidence, all_surfaces_tool_coverage_matrix as aggregate, evaluate, report_path,
-    required_commands, write_json_atomic,
+    UiControlEvidence, all_surfaces_tool_coverage_matrix as aggregate, current_registry, evaluate,
+    evaluate_with_registry, report_path, required_commands, write_json_atomic,
 };
 
 const EXPECTED_REQUIRED_COMMANDS: &[&str] = &[
@@ -318,6 +318,57 @@ fn evaluator_identifies_registry_execution_and_required_inventory_drift() {
     assert_delta(&matrix, Surface::Mcp, "execution-version-drift");
     assert_delta(&matrix, Surface::Mcp, "execution-schema-drift");
     assert_delta(&matrix, Surface::Tui, "adapter-schema-drift");
+}
+
+#[test]
+fn evaluator_rejects_unreviewed_or_removed_registry_commands_per_surface() {
+    let mut added_registry = current_registry();
+    let mut added = added_registry
+        .rows
+        .first()
+        .expect("registry has a command")
+        .clone();
+    added.command_id = "future-command".to_string();
+    added.command_name = "future-command".to_string();
+    added.command_schema_version = "threeterm.command.future-command/1".to_string();
+    added_registry.rows.push(added);
+
+    let added_matrix = evaluate_with_registry(
+        [
+            ReportInput::complete(complete_report(Surface::Api)),
+            ReportInput::complete(complete_report(Surface::Mcp)),
+            ReportInput::complete(complete_report(Surface::Tui)),
+        ],
+        &added_registry,
+    );
+    for surface in [Surface::Api, Surface::Mcp, Surface::Tui] {
+        assert!(added_matrix.deltas.iter().any(|delta| {
+            delta.surface == Some(surface)
+                && delta.kind == "unreviewed-registry-command"
+                && delta.command.as_deref() == Some("future-command")
+        }));
+    }
+
+    let mut removed_registry = current_registry();
+    let removed = removed_registry
+        .rows
+        .pop()
+        .expect("registry has a command to remove");
+    let removed_matrix = evaluate_with_registry(
+        [
+            ReportInput::complete(complete_report(Surface::Api)),
+            ReportInput::complete(complete_report(Surface::Mcp)),
+            ReportInput::complete(complete_report(Surface::Tui)),
+        ],
+        &removed_registry,
+    );
+    for surface in [Surface::Api, Surface::Mcp, Surface::Tui] {
+        assert!(removed_matrix.deltas.iter().any(|delta| {
+            delta.surface == Some(surface)
+                && delta.kind == "reviewed-command-unregistered"
+                && delta.command.as_deref() == Some(removed.command_name.as_str())
+        }));
+    }
 }
 
 #[test]

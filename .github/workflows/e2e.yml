@@ -13,6 +13,7 @@ on:
           - passed
   pull_request:
     branches: [main]
+    types: [opened, reopened, synchronize, labeled]
 
 permissions:
   contents: read
@@ -20,8 +21,12 @@ permissions:
 jobs:
   native-e2e:
     name: Native worker end-to-end checks
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           contains(github.event.pull_request.labels.*.name, 'autorelease: pending')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       PODMAN_ROOTLESS: "1"
       THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
@@ -77,7 +82,16 @@ jobs:
                     --profile minimal --component rustfmt --component clippy
                 fi
                 rustup default "${channel}" >/dev/null
+                set +e
                 bash /workspace/.github/scripts/acceptance.sh
+                acceptance_status=$?
+                set -e
+                if [[ "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" == passed ]]; then
+                  test "${acceptance_status}" -eq 0
+                else
+                  test "${acceptance_status}" -ne 0
+                fi
+                bash /workspace/.github/scripts/e2e.sh
               '
           acceptance_status=$?
           set -e

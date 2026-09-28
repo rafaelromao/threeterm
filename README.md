@@ -160,6 +160,18 @@ The native conformance workflow uses the pinned rootless Arch image declared in
 public release; the acceptance catalog records that block instead of treating
 it as a passing release gate.
 
+## Commit and release workflow
+
+Pull request titles use Conventional Commits, including an optional scope, for
+example `feat(host): add a modeling command` or
+`fix(persistence): preserve project identity`. The semantic title check accepts
+the standard release types used by this repository. Release Please groups the
+merged commit history into a single release PR and carries scopes into the
+generated changelog. The release manifest starts at `0.1.0`; `version.txt`, the
+workspace package version, and the local package entries in `Cargo.lock` are
+updated together in the generated release PR. Merging that PR creates the
+version tag and GitHub Release.
+
 ## Test suites
 
 `#[ignore = "slow: ..."]` identifies a long-running test. Pull-request CI
@@ -198,9 +210,16 @@ The CI script installs the pinned Rust toolchain when necessary, then runs
 `cargo check`, `cargo fmt --check`, `cargo clippy -D warnings`, and the fast
 test suite.
 
-`.github/workflows/e2e.yml` is manually triggered. It retains the rootless
-Arch container and immutable source-built OCCT/libslvs workers, then runs the
-complete native E2E suite and release contracts without blocking pull requests.
+`.github/workflows/e2e.yml` retains the rootless Arch container and immutable
+source-built OCCT/libslvs workers. Its native acceptance catalog and complete
+ignored E2E suite run only for a Release Please pull request carrying the
+`autorelease: pending` label, or when manually dispatched. The full suite is
+run through `.github/scripts/e2e.sh`; ordinary feature PRs run only fast CI.
+
+`.github/workflows/release-please.yml` opens or updates the release PR after
+commits reach `main`. `.github/workflows/semantic-pull-request.yml` validates
+PR titles so the release notes have Conventional Commit types and scopes to
+interpret.
 
 <a href="https://github.com/rafaelromao/sandman">
   <img src="https://raw.githubusercontent.com/rafaelromao/sandman/main/assets/badge-built-with-sandman.svg" alt="Built with Sandman" width="154" />

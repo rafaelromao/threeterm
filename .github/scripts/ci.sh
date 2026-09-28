@@ -49,6 +49,7 @@ bash tests/graphical-runner-contract.sh
 
 echo "==> release automation contract"
 bash tests/release-please-contract.sh
+bash tests/release-e2e-workflow-contract.sh
 
 echo "==> fast test suite"
 bash .github/scripts/test-suite.sh fast

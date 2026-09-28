@@ -66,7 +66,8 @@ end
 raise "merged release PR gate verification is missing" unless gate_step &&
   gate_step.dig("env", "GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}" &&
   gate_step["run"].include?("autorelease: pending") &&
-  gate_step["run"].include?("merged_at")
+  gate_step["run"].include?("merged_at") &&
+  gate_step["run"].include?("No merged Release Please PR is awaiting publication.")
 gate_index = release.dig("jobs", "release-please", "steps").index(gate_step)
 release_index = release.dig("jobs", "release-please", "steps").index(release_action)
 raise "release gate must be verified before Release Please publishes" unless gate_index < release_index

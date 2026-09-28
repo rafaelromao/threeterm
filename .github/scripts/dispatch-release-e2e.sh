@@ -18,9 +18,14 @@ if [[ -z "${release_ref}" ]]; then
 fi
 
 for workflow in e2e.yml three-journey.yml; do
-    gh api --method POST \
-        "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches" \
-        -f "ref=${release_ref}"
+    endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches"
+    if [[ "${workflow}" == e2e.yml ]]; then
+        jq -cn --arg ref "${release_ref}" \
+            '{ref: $ref, inputs: {expected_catalog_result: "passed"}}' \
+            | gh api --method POST "${endpoint}" --input -
+    else
+        gh api --method POST "${endpoint}" -f "ref=${release_ref}"
+    fi
 done
 
 printf 'Dispatched native E2E workflows for %s\n' "${release_ref}"

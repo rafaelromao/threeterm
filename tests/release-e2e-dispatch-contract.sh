@@ -15,7 +15,11 @@ gh() {
         return
     fi
     if [[ "$1" == api && "$2" == --method && "$3" == POST ]]; then
-        printf '%s\n' "$*" >>"${GH_CALL_LOG}"
+        payload=''
+        if [[ "$*" == *"--input -"* ]]; then
+            payload="$(</dev/stdin)"
+        fi
+        printf '%s | %s\n' "$*" "${payload}" >>"${GH_CALL_LOG}"
         return
     fi
     printf 'unexpected gh call: %s\n' "$*" >&2
@@ -33,8 +37,14 @@ output="$(bash "${DISPATCHER}")"
 [[ "${output}" == *"No pending Release Please PR"* ]]
 [[ ! -s "${GH_CALL_LOG}" ]]
 
+export GH_FIXTURE='[{"head":{"ref":"release-please--branches--main","repo":{"full_name":"contributor/threeterm"}},"labels":[{"name":"autorelease: pending"}]}]'
+output="$(bash "${DISPATCHER}")"
+[[ "${output}" == *"No pending Release Please PR"* ]]
+[[ ! -s "${GH_CALL_LOG}" ]]
+
 export GH_FIXTURE='[{"head":{"ref":"release-please--branches--main","repo":{"full_name":"rafaelromao/threeterm"}},"labels":[{"name":"autorelease: pending"}]}]'
 bash "${DISPATCHER}"
 [[ "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" == 2 ]]
-grep -Fq 'actions/workflows/e2e.yml/dispatches -f ref=release-please--branches--main' "${GH_CALL_LOG}"
+grep -Fq 'actions/workflows/e2e.yml/dispatches --input -' "${GH_CALL_LOG}"
+grep -Fq '"expected_catalog_result":"passed"' "${GH_CALL_LOG}"
 grep -Fq 'actions/workflows/three-journey.yml/dispatches -f ref=release-please--branches--main' "${GH_CALL_LOG}"

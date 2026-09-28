@@ -24,12 +24,18 @@ jobs:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'pull_request' &&
+           github.event.pull_request.head.repo.full_name == github.repository &&
+           startsWith(github.head_ref, 'release-please--branches--') &&
            contains(github.event.pull_request.labels.*.name, 'autorelease: pending')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
       PODMAN_ROOTLESS: "1"
-      THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
+      THREETERM_EXPECTED_ACCEPTANCE_RESULT: >-
+        ${{ inputs.expected_catalog_result ||
+            (github.event_name == 'pull_request' &&
+             contains(github.event.pull_request.labels.*.name, 'autorelease: pending') &&
+             'passed') || 'failed' }}
       THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS: "3600"
       THREETERM_COVERAGE_EVIDENCE_ROOT: target/acceptance-run/journey-coverage
     steps:

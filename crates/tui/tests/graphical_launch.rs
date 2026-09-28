@@ -11,6 +11,7 @@ use threeterm_host::bracket_equivalence::{
 };
 use threeterm_host::bracket_oracle::{
     assert_bracket_mesh, assert_complete_intents, assert_reinforcement_intents,
+    selected_edge_from_recipe,
 };
 use threeterm_host::{Host, stl_integrity};
 use threeterm_occt_worker::{BracketRequest, ExtrudeRequest, OcctWorker, new_request_id};
@@ -76,38 +77,15 @@ fn recipe_request_mismatch(stage: &Value, step: &Value) -> Result<(), String> {
             .remove("selected_edge")
             .ok_or_else(|| "finishing step has no selected edge".to_string())?;
         let edge_selection = &step["edge_selection"];
-        let midpoint: [f64; 3] = serde_json::from_value(edge_selection["midpoint"].clone())
-            .map_err(|error| format!("selected edge midpoint is invalid: {error}"))?;
-        let tangent: [f64; 3] = serde_json::from_value(edge_selection["tangent"].clone())
-            .map_err(|error| format!("selected edge tangent is invalid: {error}"))?;
-        let length = edge_selection["length"]
-            .as_f64()
-            .ok_or_else(|| "selected edge length is invalid".to_string())?;
-        let semantic_id = format!(
-            "edge-{}",
-            sha256_hex(
-                &serde_json::to_vec(&(midpoint, tangent, length))
-                    .map_err(|error| format!("selected edge evidence is invalid: {error}"))?,
-            )
-        );
         let source_revision_id = selected_edge["provenance"]["source_revision_id"]
             .as_str()
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "selected edge is missing runtime provenance".to_string())?;
-        let expected_edge = json!({
-            "semantic_id": semantic_id,
-            "provenance": {
-                "source_feature_id": step["request"]["base_feature_id"],
-                "source_revision_id": source_revision_id,
-                "source_edge_id": edge_selection["source_edge_id"]
-            },
-            "role": edge_selection["role"],
-            "evidence": {
-                "midpoint": midpoint,
-                "tangent": tangent,
-                "length": length
-            }
-        });
+        let base_feature_id = step["request"]["base_feature_id"]
+            .as_str()
+            .ok_or_else(|| "finishing step has no base feature".to_string())?;
+        let expected_edge =
+            selected_edge_from_recipe(base_feature_id, source_revision_id, edge_selection);
         if selected_edge != expected_edge {
             return Err(format!(
                 "selected edge differs: actual={selected_edge} expected={expected_edge}"

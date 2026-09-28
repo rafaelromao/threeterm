@@ -121,6 +121,8 @@ for required in \
     'RECIPE_PATH' \
     'RECIPE_SHA256' \
     'all_tools_recipe_request' \
+    'canonical_recipe_number' \
+    'canonical_recipe_vector' \
     'recipe_unavailable' \
     'file_sha256' \
     'empty-startup.png' \

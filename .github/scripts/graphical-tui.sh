@@ -1891,9 +1891,31 @@ all_tools_recipe_request() {
         "$RECIPE_PATH" || die recipe_step_missing "shared recipe has no request for ${feature_id}"
 }
 
+canonical_recipe_number() {
+    local value="$1"
+    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+        printf '%s.0' "$value"
+    else
+        printf '%s' "$value"
+    fi
+}
+
+canonical_recipe_vector() {
+    local vector="$1"
+    local -a values=()
+    mapfile -t values < <(jq -er '.[] | tostring' <<<"$vector")
+    [[ "${#values[@]}" -eq 3 ]] ||
+        die recipe_step_invalid 'edge evidence vectors must contain three numbers'
+    printf '[%s,%s,%s]' \
+        "$(canonical_recipe_number "${values[0]}")" \
+        "$(canonical_recipe_number "${values[1]}")" \
+        "$(canonical_recipe_number "${values[2]}")"
+}
+
 all_tools_recipe_edge() {
     local feature_id="$1"
     local step base_feature source_edge role midpoint tangent length revision semantic_input semantic_id
+    local midpoint_canonical tangent_canonical length_canonical
     step="$(jq -ce --arg feature_id "$feature_id" \
         '.steps[] | select(.feature_id == $feature_id)' "$RECIPE_PATH")" ||
         die recipe_step_missing "shared recipe has no edge selection for ${feature_id}"
@@ -1904,9 +1926,10 @@ all_tools_recipe_edge() {
     tangent="$(jq -ce '.edge_selection.tangent' <<<"$step")"
     length="$(jq -er '.edge_selection.length' <<<"$step")"
     revision="$(jq -er '.revision_hash' "$PROJECT_ROOT/manifest.json")"
-    semantic_input="$(jq -cn \
-        --argjson midpoint "$midpoint" --argjson tangent "$tangent" --argjson length "$length" \
-        '[$midpoint,$tangent,$length]')"
+    midpoint_canonical="$(canonical_recipe_vector "$midpoint")"
+    tangent_canonical="$(canonical_recipe_vector "$tangent")"
+    length_canonical="$(canonical_recipe_number "$length")"
+    semantic_input="[$midpoint_canonical,$tangent_canonical,$length_canonical]"
     semantic_id="$(printf '%s' "$semantic_input" | sha256sum | cut -d' ' -f1)"
     jq -cn \
         --arg base "$base_feature" \

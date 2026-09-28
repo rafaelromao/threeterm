@@ -1,0 +1,54 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out the release automation scripts
+        uses: actions/checkout@v4
+
+      # The manifest command publishes only a merged pending release PR; verify
+      # the signed gate in that case before allowing the action to tag/release.
+      - name: Verify the signed gate before publishing a merged release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          merged_release_pr="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls?state=closed&per_page=100" \
+            --jq '[.[]
+              | select(.merged_at != null)
+              | select(.head.repo.full_name == env.GITHUB_REPOSITORY)
+              | select(.head.ref | startswith("release-please--branches--"))
+              | select(any(.labels[]?; .name == "autorelease: pending"))
+              | .number] | first // empty')"
+          if [[ -z "${merged_release_pr}" ]]; then
+            printf '%s\n' 'No merged Release Please PR is awaiting publication.'
+            exit 0
+          fi
+          bash .github/scripts/release.sh verify
+
+      - name: Create or update the release pull request
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Dispatch E2E workflows for the release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/dispatch-release-e2e.sh

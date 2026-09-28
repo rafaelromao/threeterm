@@ -1,0 +1,30 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "threeterm",
+      "component": "threeterm",
+      "changelog-path": "CHANGELOG.md",
+      "version-file": "version.txt",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "version.txt"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value == 'rehearsal' || @.name.value == 'threeterm-cli' || @.name.value == 'threeterm-domain' || @.name.value == 'threeterm-host' || @.name.value == 'threeterm-lua-bridge' || @.name.value == 'threeterm-mcp' || @.name.value == 'threeterm-occt-worker' || @.name.value == 'threeterm-persistence' || @.name.value == 'threeterm-protocol' || @.name.value == 'threeterm-slvs-worker' || @.name.value == 'threeterm-theme' || @.name.value == 'threeterm-tui' || @.name.value == 'threeterm-viewport')].version"
+        }
+      ]
+    }
+  },
+  "include-component-in-tag": false,
+  "include-v-in-tags": true,
+  "pull-request-title-pattern": "chore: release ${version}"
+}

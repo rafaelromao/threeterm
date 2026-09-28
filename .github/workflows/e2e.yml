@@ -11,8 +11,8 @@ on:
         options:
           - failed
           - passed
-  pull_request:
-    branches: [main]
+  push:
+    branches: ['release-please--branches--**']
 
 permissions:
   contents: read
@@ -20,11 +20,19 @@ permissions:
 jobs:
   native-e2e:
     name: Native worker end-to-end checks
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' &&
+           startsWith(github.ref_name, 'release-please--branches--')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       PODMAN_ROOTLESS: "1"
-      THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
+      THREETERM_EXPECTED_ACCEPTANCE_RESULT: >-
+        ${{ inputs.expected_catalog_result ||
+            (github.event_name == 'push' &&
+             startsWith(github.ref_name, 'release-please--branches--') &&
+             'passed') || 'failed' }}
       THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS: "3600"
       THREETERM_COVERAGE_EVIDENCE_ROOT: target/acceptance-run/journey-coverage
     steps:
@@ -77,15 +85,24 @@ jobs:
                     --profile minimal --component rustfmt --component clippy
                 fi
                 rustup default "${channel}" >/dev/null
+                set +e
                 bash /workspace/.github/scripts/acceptance.sh
+                acceptance_status=$?
+                bash /workspace/.github/scripts/e2e.sh
+                e2e_status=$?
+                set -e
+                printf '%s\n' "${acceptance_status}" >target/release-acceptance-status
+                printf '%s\n' "${e2e_status}" >target/release-e2e-status
               '
-          acceptance_status=$?
+          podman_status=$?
           set -e
-          if [[ "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" == passed ]]; then
-            test "${acceptance_status}" -eq 0
-          else
-            test "${acceptance_status}" -ne 0
-          fi
+          test "${podman_status}" -eq 0
+          test -s target/release-acceptance-status
+          test -s target/release-e2e-status
+          bash .github/scripts/check-native-e2e-status.sh \
+            "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
+            "$(<target/release-acceptance-status)" \
+            "$(<target/release-e2e-status)"
 
       - name: Validate acceptance catalog
         run: |

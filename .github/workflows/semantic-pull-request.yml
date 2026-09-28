@@ -1,0 +1,43 @@
+name: semantic-pull-request
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  semantic-pull-request:
+    name: Conventional Commit pull request title
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the pull request history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate the pull request title
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            build
+            ci
+            chore
+            test
+            revert
+
+      - name: Validate commit headers
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/check-conventional-commits.sh "$BASE_SHA" "$HEAD_SHA"

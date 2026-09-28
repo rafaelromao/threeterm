@@ -122,6 +122,7 @@ for required in \
     'RECIPE_SHA256_EXPECTED' \
     'RECIPE_SHA256' \
     'all_tools_recipe_request' \
+    'all_tools_recipe_edge' \
     'canonical_recipe_number' \
     'canonical_recipe_vector' \
     'recipe_unavailable' \

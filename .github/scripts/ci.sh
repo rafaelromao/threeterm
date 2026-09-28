@@ -49,6 +49,7 @@ bash tests/graphical-runner-contract.sh
 
 echo "==> release automation contract"
 bash tests/conventional-commits-contract.sh
+bash tests/native-e2e-status-contract.sh
 bash tests/release-please-contract.sh
 bash tests/release-e2e-workflow-contract.sh
 bash tests/release-e2e-dispatch-contract.sh

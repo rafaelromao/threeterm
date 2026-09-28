@@ -28,6 +28,10 @@ raise "full ignored E2E suite must run in the release E2E job" unless commands.i
 raise "expected acceptance failure must not suppress the full E2E suite" unless
   commands.include?("acceptance_status=$?") &&
   commands.index("acceptance.sh") < commands.index("e2e.sh")
+raise "acceptance and full E2E outcomes must be checked independently" unless
+  commands.include?("release-acceptance-status") &&
+  commands.include?("release-e2e-status") &&
+  commands.include?("check-native-e2e-status.sh")
 
 eligible = lambda do |event, ref_name = ""|
   event == "workflow_dispatch" ||

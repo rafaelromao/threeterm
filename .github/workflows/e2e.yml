@@ -88,21 +88,21 @@ jobs:
                 set +e
                 bash /workspace/.github/scripts/acceptance.sh
                 acceptance_status=$?
-                set -e
-                if [[ "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" == passed ]]; then
-                  test "${acceptance_status}" -eq 0
-                else
-                  test "${acceptance_status}" -ne 0
-                fi
                 bash /workspace/.github/scripts/e2e.sh
+                e2e_status=$?
+                set -e
+                printf '%s\n' "${acceptance_status}" >target/release-acceptance-status
+                printf '%s\n' "${e2e_status}" >target/release-e2e-status
               '
-          acceptance_status=$?
+          podman_status=$?
           set -e
-          if [[ "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" == passed ]]; then
-            test "${acceptance_status}" -eq 0
-          else
-            test "${acceptance_status}" -ne 0
-          fi
+          test "${podman_status}" -eq 0
+          test -s target/release-acceptance-status
+          test -s target/release-e2e-status
+          bash .github/scripts/check-native-e2e-status.sh \
+            "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
+            "$(<target/release-acceptance-status)" \
+            "$(<target/release-e2e-status)"
 
       - name: Validate acceptance catalog
         run: |

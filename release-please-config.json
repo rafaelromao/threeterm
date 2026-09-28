@@ -8,6 +8,10 @@
       "version-file": "version.txt",
       "extra-files": [
         {
+          "type": "generic",
+          "path": "version.txt"
+        },
+        {
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.workspace.package.version"

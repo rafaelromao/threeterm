@@ -1,9 +1,8 @@
 name: three-journey-gate
 
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, reopened, synchronize, labeled]
+  push:
+    branches: ['release-please--branches--**']
   workflow_dispatch:
 
 permissions:
@@ -19,10 +18,8 @@ jobs:
     name: API and MCP journeys
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'pull_request' &&
-           github.event.pull_request.head.repo.full_name == github.repository &&
-           startsWith(github.head_ref, 'release-please--branches--') &&
-           contains(github.event.pull_request.labels.*.name, 'autorelease: pending')) }}
+          (github.event_name == 'push' &&
+           startsWith(github.ref_name, 'release-please--branches--')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -105,10 +102,8 @@ jobs:
     if: >-
       ${{ always() &&
           (github.event_name == 'workflow_dispatch' ||
-           (github.event_name == 'pull_request' &&
-            github.event.pull_request.head.repo.full_name == github.repository &&
-            startsWith(github.head_ref, 'release-please--branches--') &&
-            contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) }}
+           (github.event_name == 'push' &&
+            startsWith(github.ref_name, 'release-please--branches--'))) }}
     runs-on: [self-hosted, linux, x64, threeterm-graphical]
     timeout-minutes: 60
     steps:
@@ -170,10 +165,8 @@ jobs:
     if: >-
       ${{ always() &&
           (github.event_name == 'workflow_dispatch' ||
-           (github.event_name == 'pull_request' &&
-            github.event.pull_request.head.repo.full_name == github.repository &&
-            startsWith(github.head_ref, 'release-please--branches--') &&
-            contains(github.event.pull_request.labels.*.name, 'autorelease: pending'))) }}
+           (github.event_name == 'push' &&
+            startsWith(github.ref_name, 'release-please--branches--'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 80
     steps:

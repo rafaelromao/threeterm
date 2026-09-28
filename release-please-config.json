@@ -14,7 +14,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'rehearsal' || @.name == 'threeterm-cli' || @.name == 'threeterm-domain' || @.name == 'threeterm-host' || @.name == 'threeterm-lua-bridge' || @.name == 'threeterm-mcp' || @.name == 'threeterm-occt-worker' || @.name == 'threeterm-persistence' || @.name == 'threeterm-protocol' || @.name == 'threeterm-slvs-worker' || @.name == 'threeterm-theme' || @.name == 'threeterm-tui' || @.name == 'threeterm-viewport')].version"
+          "jsonpath": "$.package[?(@.name.value == 'rehearsal' || @.name.value == 'threeterm-cli' || @.name.value == 'threeterm-domain' || @.name.value == 'threeterm-host' || @.name.value == 'threeterm-lua-bridge' || @.name.value == 'threeterm-mcp' || @.name.value == 'threeterm-occt-worker' || @.name.value == 'threeterm-persistence' || @.name.value == 'threeterm-protocol' || @.name.value == 'threeterm-slvs-worker' || @.name.value == 'threeterm-theme' || @.name.value == 'threeterm-tui' || @.name.value == 'threeterm-viewport')].version"
         }
       ]
     }

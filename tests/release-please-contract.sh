@@ -30,6 +30,7 @@ assert extra_files["Cargo.toml"]["jsonpath"] == "$.workspace.package.version"
 assert extra_files["Cargo.lock"]["type"] == "toml"
 lock_query = extra_files["Cargo.lock"]["jsonpath"]
 assert lock_query.startswith("$.package[") and lock_query.endswith("].version")
+assert "@.name.value ==" in lock_query
 
 workspace_packages = {
     item["name"] for item in lock["package"]

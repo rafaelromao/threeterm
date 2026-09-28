@@ -9,6 +9,12 @@ the signed result before using `.github/scripts/release.sh`. The script refuses
 an unsigned, stale, incomplete, or blocked gate. Do not cut a tag, create a
 GitHub Release, push the AUR package, or submit a COPR build directly.
 
+Release Please may prepare a versioned release PR from Conventional Commits.
+When a release PR is merged, `.github/workflows/release-please.yml` runs
+`.github/scripts/release.sh verify` before Release Please can create the tag or
+GitHub Release. The release PR's native E2E acceptance catalog must also pass,
+including the current `release.namespace` gate.
+
 The use conditions and similar-mark analysis come from the closed Wayfinder
 decision [Complete ThreeTerm trademark and namespace clearance (#55)](https://github.com/rafaelromao/threeterm/issues/55), with the namespace gate from
 [Validate ThreeTerm release namespaces (#53)](https://github.com/rafaelromao/threeterm/issues/53)

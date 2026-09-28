@@ -50,6 +50,7 @@ root = Pathname.new(ARGV.fetch(0))
 release = YAML.load_file(root.join(".github/workflows/release-please.yml"), aliases: true)
 release_events = release.fetch(true)
 raise "release workflow must run on main pushes" unless release_events.dig("push", "branches") == ["main"]
+raise "release workflow must have a bounded timeout" unless release.dig("jobs", "release-please", "timeout-minutes") == 10
 raise "release workflow must write repository contents" unless release.dig("permissions", "contents") == "write"
 raise "release workflow must open pull requests" unless release.dig("permissions", "pull-requests") == "write"
 raise "release workflow must dispatch release E2E workflows" unless release.dig("permissions", "actions") == "write"
@@ -59,6 +60,16 @@ end
 raise "release-please action/config is missing" unless release_action &&
   release_action.dig("with", "config-file") == "release-please-config.json" &&
   release_action.dig("with", "manifest-file") == ".release-please-manifest.json"
+gate_step = release.dig("jobs", "release-please", "steps").find do |step|
+  step["run"].to_s.include?("release.sh verify")
+end
+raise "merged release PR gate verification is missing" unless gate_step &&
+  gate_step.dig("env", "GH_TOKEN") == "${{ secrets.GITHUB_TOKEN }}" &&
+  gate_step["run"].include?("autorelease: pending") &&
+  gate_step["run"].include?("merged_at")
+gate_index = release.dig("jobs", "release-please", "steps").index(gate_step)
+release_index = release.dig("jobs", "release-please", "steps").index(release_action)
+raise "release gate must be verified before Release Please publishes" unless gate_index < release_index
 dispatch_step = release.dig("jobs", "release-please", "steps").find do |step|
   step["run"].to_s.include?("dispatch-release-e2e.sh")
 end
@@ -73,6 +84,7 @@ raise "release workflow must check out the dispatcher script before running it" 
 semantic = YAML.load_file(root.join(".github/workflows/semantic-pull-request.yml"), aliases: true)
 semantic_events = semantic.fetch(true)
 raise "semantic title gate must run on pull requests" unless semantic_events.key?("pull_request")
+raise "semantic title gate must have a bounded timeout" unless semantic.dig("jobs", "semantic-pull-request", "timeout-minutes") == 10
 semantic_action = semantic.dig("jobs", "semantic-pull-request", "steps").find do |step|
   step["uses"] == "amannn/action-semantic-pull-request@v5"
 end

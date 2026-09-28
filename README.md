@@ -172,8 +172,10 @@ the standard release types used by this repository. Release Please groups the
 merged commit history into a single release PR and carries scopes into the
 generated changelog. The release manifest starts at `0.1.0`; `version.txt`, the
 workspace package version, and the local package entries in `Cargo.lock` are
-updated together in the generated release PR. Merging that PR creates the
-version tag and GitHub Release.
+updated together in the generated release PR. Before publishing a merged
+release PR, `.github/scripts/release.sh verify` checks the signed
+release-namespace gate; an unsigned or stale gate stops tag and GitHub Release
+creation.
 
 ## Test suites
 

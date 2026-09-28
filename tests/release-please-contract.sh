@@ -19,6 +19,7 @@ package = config["packages"]["."]
 assert package["release-type"] == "simple"
 assert package["package-name"] == "threeterm"
 assert package["changelog-path"] == "CHANGELOG.md"
+assert package["version-file"] == "version.txt"
 assert config["pull-request-title-pattern"] == "chore: release ${version}"
 assert manifest == {".": "0.1.0"}
 assert (root / "version.txt").read_text().strip() == manifest["."]

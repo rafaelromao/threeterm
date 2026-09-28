@@ -5,6 +5,7 @@
       "package-name": "threeterm",
       "component": "threeterm",
       "changelog-path": "CHANGELOG.md",
+      "version-file": "version.txt",
       "extra-files": [
         {
           "type": "toml",

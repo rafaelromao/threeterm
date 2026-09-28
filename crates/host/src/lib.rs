@@ -7641,6 +7641,7 @@ impl Host {
                     )?
                 }
                 CanonicalIntent::Fillet(inner) => stage_replayed_finishing_geometry(
+                    self,
                     root,
                     replay_stage_root,
                     &loaded,
@@ -7649,6 +7650,7 @@ impl Host {
                     FinishingReplayIntent::Fillet(inner.clone()),
                 )?,
                 CanonicalIntent::Chamfer(inner) => stage_replayed_finishing_geometry(
+                    self,
                     root,
                     replay_stage_root,
                     &loaded,
@@ -7657,6 +7659,7 @@ impl Host {
                     FinishingReplayIntent::Chamfer(inner.clone()),
                 )?,
                 CanonicalIntent::Shell(inner) => stage_replayed_finishing_geometry(
+                    self,
                     root,
                     replay_stage_root,
                     &loaded,
@@ -7665,6 +7668,7 @@ impl Host {
                     FinishingReplayIntent::Shell(inner.clone()),
                 )?,
                 CanonicalIntent::Draft(inner) => stage_replayed_finishing_geometry(
+                    self,
                     root,
                     replay_stage_root,
                     &loaded,
@@ -7673,6 +7677,7 @@ impl Host {
                     FinishingReplayIntent::Draft(inner.clone()),
                 )?,
                 CanonicalIntent::Loft(inner) => stage_replayed_finishing_geometry(
+                    self,
                     root,
                     replay_stage_root,
                     &loaded,
@@ -10578,7 +10583,30 @@ impl Host {
     where
         R: DeserializeOwned + Serialize,
     {
-        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
+        self.stage_occt_result_inner(root, request, operation, worker, None, None, None, None)
+    }
+
+    fn stage_occt_result_with_worker_revision<R>(
+        &self,
+        root: &Path,
+        request: &impl Serialize,
+        operation: threeterm_occt_worker::Operation,
+        worker: &OcctWorker,
+        worker_revision: &str,
+    ) -> Result<StagedOcctResult<R>, HostError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        self.stage_occt_result_inner(
+            root,
+            request,
+            operation,
+            worker,
+            None,
+            None,
+            None,
+            Some(worker_revision),
+        )
     }
 
     fn stage_occt_result_for_revision<R>(
@@ -10595,7 +10623,7 @@ impl Host {
         // Replay executes against the currently loaded Revision Snapshot. The
         // intent's source revision remains provenance, not the artifact's
         // promotion revision.
-        self.stage_occt_result_inner(root, request, operation, worker, None, None, None)
+        self.stage_occt_result_inner(root, request, operation, worker, None, None, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -10731,6 +10759,7 @@ impl Host {
             Some(cancel),
             Some(on_progress),
             None,
+            None,
         )
     }
 
@@ -10744,6 +10773,7 @@ impl Host {
         cancel: Option<&AtomicBool>,
         on_progress: Option<&mut dyn FnMut(&threeterm_protocol::supervisor::Progress)>,
         source_revision_override: Option<&str>,
+        worker_revision_override: Option<&str>,
     ) -> Result<StagedOcctResult<R>, HostError>
     where
         R: DeserializeOwned + Serialize,
@@ -10795,6 +10825,7 @@ impl Host {
         )?;
         let execution_revision = source_revision_override.unwrap_or(&source_snapshot.revision_hash);
         binding.source_revision_id = execution_revision.to_string();
+        let worker_revision = worker_revision_override.unwrap_or(execution_revision);
         let stage =
             Stage::create_fresh(root.join(".derived"), operation.as_str()).map_err(|error| {
                 HostError::BrepIo {
@@ -10818,7 +10849,7 @@ impl Host {
             Some(cancel) => match on_progress {
                 Some(on_progress) => worker
                     .clone()
-                    .with_revision_id(execution_revision.to_string())
+                    .with_revision_id(worker_revision.to_string())
                     .invoke_staged_with_cancel_and_progress(
                         request_value,
                         operation,
@@ -10828,12 +10859,12 @@ impl Host {
                     ),
                 None => worker
                     .clone()
-                    .with_revision_id(execution_revision.to_string())
+                    .with_revision_id(worker_revision.to_string())
                     .invoke_staged_with_cancel(request_value, operation, stage, cancel),
             },
             None => worker
                 .clone()
-                .with_revision_id(execution_revision.to_string())
+                .with_revision_id(worker_revision.to_string())
                 .invoke_staged(request_value, operation, stage),
         };
         let completion = match completion_result {
@@ -13318,6 +13349,7 @@ impl Host {
             Some(cancel),
             Some(&mut on_progress),
             None,
+            None,
         )?;
         let source_snapshot = derived.source_snapshot.clone();
         let (snapshot, result, artifact) = self.promote_occt_result(root, derived)?;
@@ -13905,6 +13937,7 @@ fn rollback_replay_artifacts(
 
 #[allow(dead_code)]
 fn stage_replayed_finishing_geometry(
+    host: &Host,
     root: &Path,
     replay_stage_root: &Path,
     loaded: &LoadedBundle,
@@ -13913,6 +13946,7 @@ fn stage_replayed_finishing_geometry(
     intent: FinishingReplayIntent,
 ) -> Result<(PathBuf, String), HostError> {
     let replayed = replay_finishing_geometry(
+        host,
         root,
         replay_stage_root,
         loaded,
@@ -13925,6 +13959,7 @@ fn stage_replayed_finishing_geometry(
 
 #[allow(dead_code)]
 fn replay_finishing_geometry(
+    host: &Host,
     root: &Path,
     replay_stage_root: &Path,
     loaded: &LoadedBundle,
@@ -14171,14 +14206,31 @@ fn replay_finishing_geometry(
                     replay_stage_root,
                     format!("{feature_id}.worker.brep.partial"),
                 )
-                .with_feature_id(&feature_id);
-            read_result!(
-                worker
-                    .clone()
-                    .with_revision_id(source_revision)
-                    .shell(&request),
-                |_result: &ShellResult| Ok::<(), HostError>(())
-            )
+                .with_feature_id(&feature_id)
+                .with_base_feature_id(&value.base_feature_id);
+            let derived = host.stage_occt_result_with_worker_revision::<ShellResult>(
+                root,
+                &request,
+                threeterm_occt_worker::Operation::Shell,
+                worker,
+                &source_revision,
+            )?;
+            let (path, fingerprint) = host.stage_replayed_occt_result(
+                root,
+                replay_stage_root,
+                loaded,
+                &feature_id,
+                derived,
+            )?;
+            let bytes = fs::read(&path).map_err(|error| HostError::BrepIo {
+                detail: format!("read replayed shell BREP failed: {error}"),
+            })?;
+            return Ok(ReplayedGeometry {
+                feature_id,
+                path,
+                fingerprint,
+                bytes,
+            });
         }
         FinishingReplayIntent::Draft(value) => {
             let base_path = dependency_path(&value.base_feature_id)?;

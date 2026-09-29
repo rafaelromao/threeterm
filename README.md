@@ -256,6 +256,8 @@ ignored E2E suite run only for a Release Please pull request carrying the
 run through `.github/scripts/e2e.sh`; ordinary feature PRs run only fast CI.
 Release Please dispatches both native E2E workflows at the release branch after
 updating the PR, because its `GITHUB_TOKEN` cannot trigger follow-up PR events.
+It waits for both runs and publishes a `Release E2E gate` status check on the
+release PR commit, so the slow results appear with that PR's checks.
 That dispatch expects the acceptance catalog to pass, preserving the signed
 release-namespace gate; the manual run below expects the current unsigned-gate
 failure unless `passed` is selected after the gate is signed.

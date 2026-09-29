@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "${ROOT}" <<'PY'
 import json
 import pathlib
+import re
 import sys
 import tomllib
 
@@ -23,9 +24,11 @@ assert package["version-file"] == "version.txt"
 assert package["extra-files"]
 assert {"type": "generic", "path": "version.txt"} in package["extra-files"]
 assert config["pull-request-title-pattern"] == "chore: release ${version}"
-assert manifest == {".": "0.1.0"}
-assert (root / "version.txt").read_text().strip() == manifest["."]
-assert workspace["workspace"]["package"]["version"] == manifest["."]
+assert set(manifest) == {"."}
+release_version = manifest["."]
+assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", release_version)
+assert (root / "version.txt").read_text().strip() == release_version
+assert workspace["workspace"]["package"]["version"] == release_version
 
 extra_files = {entry["path"]: entry for entry in package["extra-files"]}
 assert extra_files["Cargo.toml"]["type"] == "toml"
@@ -41,7 +44,7 @@ workspace_packages = {
 }
 assert len(workspace_packages) == 13, workspace_packages
 assert all(
-    item["version"] == manifest["."]
+    item["version"] == release_version
     for item in lock["package"]
     if item["name"] in workspace_packages
 )
@@ -53,14 +56,15 @@ root = Pathname.new(ARGV.fetch(0))
 release = YAML.load_file(root.join(".github/workflows/release-please.yml"), aliases: true)
 release_events = release.fetch(true)
 raise "release workflow must run on main pushes" unless release_events.dig("push", "branches") == ["main"]
-raise "release workflow must have a bounded timeout" unless release.dig("jobs", "release-please", "timeout-minutes") == 10
+raise "release workflow must have a bounded timeout" unless release.dig("jobs", "release-please", "timeout-minutes") == 300
 raise "release workflow defaults must be read-only" unless
   release.dig("permissions", "contents") == "read" &&
   release.dig("permissions", "pull-requests") == "read" &&
-  release.dig("permissions", "actions") == "read"
+  release.dig("permissions", "actions") == "read" &&
+  release.dig("permissions", "statuses") == "read"
 release_job_permissions = release.dig("jobs", "release-please", "permissions")
 raise "release job must have only its required write permissions" unless
-  release_job_permissions == {"actions" => "write", "contents" => "write", "pull-requests" => "write"}
+  release_job_permissions == {"actions" => "write", "contents" => "write", "pull-requests" => "write", "statuses" => "write"}
 release_action = release.dig("jobs", "release-please", "steps").find do |step|
   step["uses"] == "googleapis/release-please-action@v4"
 end

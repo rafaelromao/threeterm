@@ -8,13 +8,15 @@ permissions:
   actions: read
   contents: read
   pull-requests: read
+  statuses: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 300
     permissions:
       actions: write
+      statuses: write
       contents: write
       pull-requests: write
     steps:

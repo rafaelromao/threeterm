@@ -78,13 +78,10 @@ dispatch_workflow() {
     printf '%s\n' "${dispatched_at}"
 }
 
-wait_for_workflow() {
+terminal_gate_job_result() {
     local workflow="$1"
-    local dispatched_at="$2"
-    local deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
-    local runs_json run_json jobs_json gate_job_json now status run_id gate_job_name
-    local endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${release_ref}&event=workflow_dispatch&per_page=100"
-
+    local run_json="$2"
+    local gate_job_name run_id jobs_json gate_job_json
     case "${workflow}" in
         e2e.yml)
             gate_job_name='Native worker end-to-end checks'
@@ -97,6 +94,29 @@ wait_for_workflow() {
             return 1
             ;;
     esac
+
+    run_id="$(jq -r '.id // empty' <<<"${run_json}")" || return 1
+    [[ -n "${run_id}" ]] || return 0
+
+    jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")" || return 1
+    gate_job_json="$(jq -c --arg name "${gate_job_name}" '
+        [.jobs[]? | select(.name == $name and .status == "completed")]
+        | last // empty
+    ' <<<"${jobs_json}")" || return 1
+    [[ -n "${gate_job_json}" ]] || return 0
+
+    jq -cn \
+        --arg conclusion "$(jq -r '.conclusion // "missing"' <<<"${gate_job_json}")" \
+        --arg html_url "$(jq -r '.html_url // empty' <<<"${run_json}")" \
+        '{conclusion: $conclusion, html_url: $html_url}'
+}
+
+wait_for_workflow() {
+    local workflow="$1"
+    local dispatched_at="$2"
+    local deadline=$(( $(date +%s) + TIMEOUT_SECONDS ))
+    local runs_json run_json now status terminal_result
+    local endpoint="repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?branch=${release_ref}&event=workflow_dispatch&per_page=100"
 
     while :; do
         runs_json="$(gh api "${endpoint}")" || return 1
@@ -113,23 +133,14 @@ wait_for_workflow() {
                 return 0
             fi
 
-            # A workflow can stay queued after its aggregate gate has finished
-            # when an unrelated self-hosted job is still waiting for a runner.
-            # The aggregate job is the authoritative result for this gate.
-            run_id="$(jq -r '.id // empty' <<<"${run_json}")"
-            if [[ -n "${run_id}" ]]; then
-                jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")" || return 1
-                gate_job_json="$(jq -c --arg name "${gate_job_name}" '
-                    [.jobs[]? | select(.name == $name and .status == "completed")]
-                    | last // empty
-                ' <<<"${jobs_json}")" || return 1
-                if [[ -n "${gate_job_json}" ]]; then
-                    jq -cn \
-                        --arg conclusion "$(jq -r '.conclusion // "missing"' <<<"${gate_job_json}")" \
-                        --arg html_url "$(jq -r '.html_url // empty' <<<"${run_json}")" \
-                        '{conclusion: $conclusion, html_url: $html_url}'
+            # A graphical job can remain queued after the aggregate gate ends.
+            if terminal_result="$(terminal_gate_job_result "${workflow}" "${run_json}")"; then
+                if [[ -n "${terminal_result}" ]]; then
+                    printf '%s\n' "${terminal_result}"
                     return 0
                 fi
+            else
+                return 1
             fi
         fi
         now="$(date +%s)"

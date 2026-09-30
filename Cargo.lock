@@ -367,7 +367,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rehearsal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-host"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-lua-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mlua",
  "serde",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix",
  "serde",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-occt-worker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-persistence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix",
  "regex",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-slvs-worker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -626,11 +626,11 @@ dependencies = [
 
 [[package]]
 name = "threeterm-theme"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "threeterm-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix",
  "serde",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "threeterm-viewport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "serde",

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GATE="${ROOT}/.github/scripts/three-journey-gate.sh"
+SHOWCASE="${ROOT}/.github/scripts/three-journey-showcase.sh"
 RUN_ROOT="${ROOT}/target/three-journey-gate-contract"
 MISSING_MANIFEST_ROOT="${ROOT}/target/three-journey-gate-missing-manifest"
 
@@ -11,6 +12,7 @@ rm -rf "${RUN_ROOT}" "${MISSING_MANIFEST_ROOT}"
 mkdir -p "${RUN_ROOT}"
 
 bash -n "${GATE}"
+bash -n "${SHOWCASE}"
 help="$(bash "${GATE}" --help)"
 for required in \
     '--surface NAME' \
@@ -21,6 +23,29 @@ for required in \
     'THREETERM_THREE_JOURNEY_KILL_GRACE_SECONDS'; do
     grep -Fq -- "${required}" <<<"${help}"
 done
+
+showcase_help="$(bash "${SHOWCASE}" --help)"
+for required in \
+    'three-journey-showcase.sh' \
+    'fullscreen nested Weston/Ghostty window' \
+    'THREETERM_THREE_JOURNEY_ROOT'; do
+    grep -Fq -- "${required}" <<<"${showcase_help}"
+done
+for required in \
+    'THREETERM_GRAPHICAL_VISIBLE=true' \
+    'public command journey' \
+    'JSON-RPC tool journey' \
+    'visible Ghostty modeling journey' \
+    'catalog.json'; do
+    grep -Fq -- "${required}" "${SHOWCASE}"
+done
+
+set +e
+showcase_output="$(env -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR bash "${SHOWCASE}" 2>&1)"
+showcase_status=$?
+set -e
+((showcase_status != 0))
+grep -Fq 'requires WAYLAND_DISPLAY' <<<"${showcase_output}"
 
 for required in \
     'threeterm.acceptance.run/1' \

@@ -171,6 +171,20 @@ THREETERM_JOURNEY_RUN_ID="$(git rev-parse HEAD)-$(date +%s)" \
   bash .github/scripts/three-journey-gate.sh
 ```
 
+For a narrated run with the TUI visible on your desktop, launch the showcase
+from a Wayland desktop terminal:
+
+```sh
+bash .github/scripts/three-journey-showcase.sh
+```
+
+The API and MCP test output streams in the launch terminal. During the TUI
+journey, a fullscreen nested Weston/Ghostty window shows the scripted
+keyboard-first modeling flow, including previews, commits, navigation, and STL
+export. The same evidence catalog and per-surface logs are retained under
+`target/three-journey-showcase` by default; set
+`THREETERM_THREE_JOURNEY_ROOT` to choose another location.
+
 Each producer retains stdout, stderr, attempt metadata, journey reports,
 coverage reports, native-worker identities, and geometric comparison output
 under `target/three-journey-gate`. The timeout defaults to 900 seconds per

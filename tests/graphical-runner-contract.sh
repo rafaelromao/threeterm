@@ -32,6 +32,7 @@ jq -e '
     .result == "not_run" and
     .test == "production_tui_ghostty_session" and
     .configuration.locale == "C.UTF-8" and
+    .configuration.display_mode == "private-headless" and
     .configuration.palette == "catppuccin" and
     .configuration.compositor.width == 800 and
     .configuration.compositor.height == 600 and
@@ -52,6 +53,10 @@ jq -e '
     (.requirements | index("setsid")) and
     (.requirements | index("timeout"))
 ' <<<"${plan}" >/dev/null
+
+visible_plan="$(THREETERM_GRAPHICAL_VISIBLE=true bash "${RUNNER}" --print-plan)"
+jq -e '.configuration.display_mode == "fullscreen-nested-wayland"' \
+    <<<"${visible_plan}" >/dev/null
 
 fresh_plan="$(bash "${RUNNER}" production_tui_create_project_extrude --print-plan)"
 jq -e '
@@ -199,6 +204,11 @@ for required in \
     'fail_stimulus' \
     'check_probe_stimulus' \
     'wait_for_probe_stimulus' \
+    'THREETERM_GRAPHICAL_VISIBLE' \
+    'wayland-backend.so' \
+    'PARENT_WAYLAND_SOCKET' \
+    'graphical_visible_display_unavailable' \
+    '--fullscreen' \
     '800x480' \
     '?1002l' \
     'cleanup_evidence'; do
@@ -412,6 +422,24 @@ jq -e --arg expected_hash "${expected_hash}" '
 ' "${run_root}/tool-versions.json" >/dev/null
 jq -e '.result == "failed" and .failure.code == "compositor_unavailable"' \
     "${run_root}/manifest.json" >/dev/null
+
+visible_run_root="${tool_versions_dir}/visible-run"
+set +e
+env -u WAYLAND_DISPLAY -u XDG_RUNTIME_DIR \
+    PATH="${fake_bin}:${PATH}" THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT="${contract}" \
+    THREETERM_GRAPHICAL_VISIBLE=true THREETERM_GRAPHICAL_TIMEOUT_SECONDS=2 \
+    bash "${RUNNER}" production_tui_ghostty_session \
+    --tui-binary /bin/true --project-root "${ROOT}" --evidence-root "${visible_run_root}" \
+    >"${tool_versions_dir}/visible-stdout" 2>"${tool_versions_dir}/visible-stderr"
+visible_status=$?
+set -e
+((visible_status != 0))
+jq -e '
+    .result == "failed" and
+    .failure.code == "graphical_visible_display_unavailable" and
+    .configuration.display_mode == "fullscreen-nested-wayland"
+' \
+    "${visible_run_root}/manifest.json" >/dev/null
 
 fresh_worker_run_root="${tool_versions_dir}/fresh-worker-run"
 set +e

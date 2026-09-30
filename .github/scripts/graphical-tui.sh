@@ -18,6 +18,16 @@ VIEWPORT_CROP='0,0,800x480'
 LOCALE='C.UTF-8'
 RUNNER_TIMEOUT_SECONDS="${THREETERM_GRAPHICAL_TIMEOUT_SECONDS:-60}"
 PROBE_STIMULUS_SECONDS="${THREETERM_GRAPHICAL_PROBE_STIMULUS_SECONDS:-2}"
+VISIBLE_MODE="${THREETERM_GRAPHICAL_VISIBLE:-false}"
+DISPLAY_MODE='private-headless'
+if [[ "$VISIBLE_MODE" == true ]]; then
+    DISPLAY_MODE='fullscreen-nested-wayland'
+fi
+PARENT_XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}"
+PARENT_WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}"
+PARENT_WAYLAND_SOCKET=''
+PARENT_WAYLAND_ALIAS=''
+unset WAYLAND_SOCKET
 
 TUI_BINARY=''
 PROJECT_ROOT=''
@@ -152,6 +162,8 @@ Usage:
 
 The named test requires a qualified direct-Ghostty graphical environment. It
 never spoofs TERM or TERM_PROGRAM and never passes when prerequisites are absent.
+Set THREETERM_GRAPHICAL_VISIBLE=true from a Wayland session to show the nested
+Weston/Ghostty window on screen instead of using the headless backend.
 EOF
 }
 
@@ -162,6 +174,7 @@ print_plan() {
   "result": "not_run",
   "test": "$TEST_ID",
   "configuration": {
+    "display_mode": "$DISPLAY_MODE",
     "locale": "C.UTF-8",
     "palette": "catppuccin",
     "compositor": {"width": 800, "height": 600},
@@ -649,8 +662,8 @@ write_minimal_manifest() {
     escaped_code="$(json_escape_minimal "${failure_code:-runner_failure}")"
     escaped_detail="$(json_escape_minimal "${failure_detail:-graphical runner failed}")"
     escaped_recipe_path="$(json_escape_minimal "$RECIPE_PATH")"
-    printf '{"schema_version":"%s","result":"failed","test":"%s","recipe":{"path":"%s","file_sha256":"%s"},"integrity":"unavailable","configuration":{"locale":"%s","compositor":{"width":%d,"height":%d},"terminal":{"columns":%d,"rows":%d},"viewport_crop":"%s"},"failure":{"code":"%s","detail":"%s"},"artifacts":[]}\n' \
-        "$SCHEMA_VERSION" "$TEST_ID" "$escaped_recipe_path" "$RECIPE_SHA256" "$LOCALE" \
+    printf '{"schema_version":"%s","result":"failed","test":"%s","recipe":{"path":"%s","file_sha256":"%s"},"integrity":"unavailable","configuration":{"display_mode":"%s","locale":"%s","compositor":{"width":%d,"height":%d},"terminal":{"columns":%d,"rows":%d},"viewport_crop":"%s"},"failure":{"code":"%s","detail":"%s"},"artifacts":[]}\n' \
+        "$SCHEMA_VERSION" "$TEST_ID" "$escaped_recipe_path" "$RECIPE_SHA256" "$DISPLAY_MODE" "$LOCALE" \
         "$COMPOSITOR_WIDTH" "$COMPOSITOR_HEIGHT" "$TERMINAL_COLUMNS" "$TERMINAL_ROWS" \
         "$VIEWPORT_CROP" "$escaped_code" "$escaped_detail" \
         >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
@@ -720,6 +733,20 @@ check_prerequisites() {
         die toolchain_contract_invalid 'toolchain contract has no Weston headless backend'
     [[ "$backend" == 'headless-backend.so' ]] ||
         die toolchain_contract_invalid "unsupported Weston backend: $backend"
+
+    if [[ "$VISIBLE_MODE" == true ]]; then
+        [[ -n "$PARENT_WAYLAND_DISPLAY" ]] ||
+            die graphical_visible_display_unavailable 'visible mode requires an existing Wayland display'
+        if [[ "$PARENT_WAYLAND_DISPLAY" == /* ]]; then
+            PARENT_WAYLAND_SOCKET="$PARENT_WAYLAND_DISPLAY"
+        else
+            [[ -n "$PARENT_XDG_RUNTIME_DIR" ]] ||
+                die graphical_visible_display_unavailable 'visible mode requires XDG_RUNTIME_DIR'
+            PARENT_WAYLAND_SOCKET="${PARENT_XDG_RUNTIME_DIR}/${PARENT_WAYLAND_DISPLAY}"
+        fi
+        [[ -S "$PARENT_WAYLAND_SOCKET" ]] ||
+            die graphical_visible_display_unavailable "Wayland socket is unavailable: $PARENT_WAYLAND_SOCKET"
+    fi
 
     if [[ "$TEST_ID" == 'production_tui_create_project_extrude' ||
         "$TEST_ID" == 'production_tui_reinforcement' ||
@@ -999,11 +1026,22 @@ EOF
 }
 
 start_compositor() {
+    local backend='headless-backend.so'
+    local upstream_display="$WAYLAND_DISPLAY"
+    local -a backend_options=()
+    if [[ "$VISIBLE_MODE" == true ]]; then
+        backend='wayland-backend.so'
+        backend_options=(--fullscreen)
+        PARENT_WAYLAND_ALIAS="threeterm-parent-${BASHPID}.wayland"
+        ln -s "$PARENT_WAYLAND_SOCKET" "${XDG_RUNTIME_DIR}/${PARENT_WAYLAND_ALIAS}" ||
+            die visible_runtime_setup_failed 'could not connect the private runtime to the parent Wayland display'
+        upstream_display="$PARENT_WAYLAND_ALIAS"
+    fi
     env -u TERM -u TERM_PROGRAM -u TMUX -u SSH_CONNECTION -u SSH_TTY \
         LC_ALL=C.UTF-8 LANG=C.UTF-8 HOME="$EVIDENCE_ROOT/home" \
         XDG_CONFIG_HOME="$EVIDENCE_ROOT/config" XDG_CACHE_HOME="$EVIDENCE_ROOT/cache" \
-        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-        setsid weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" WAYLAND_DISPLAY="$upstream_display" \
+        setsid weston --backend="$backend" "${backend_options[@]}" --socket="$WAYLAND_DISPLAY" \
         --width="$COMPOSITOR_WIDTH" --height="$COMPOSITOR_HEIGHT" --idle-time=0 \
         --continue-without-input >"$WESTON_LOG" 2>&1 &
     WESTON_PID=$!
@@ -2611,6 +2649,7 @@ write_manifest() {
             --arg recipe_sha256 "$RECIPE_SHA256" \
             --arg source_commit "$source_commit" \
             --argjson source_dirty "$dirty_json" \
+            --arg display_mode "$DISPLAY_MODE" \
             --arg locale "$LOCALE" \
             --argjson compositor_width "$COMPOSITOR_WIDTH" \
             --argjson compositor_height "$COMPOSITOR_HEIGHT" \
@@ -2657,7 +2696,7 @@ write_manifest() {
                --arg discovery_screenshot "$DISCOVERY_SCREENSHOT" \
                --argjson artifacts "$artifacts" \
             --argjson failure "$failure_json" \
-              '{schema_version:$schema_version,result:$result,test:$test,recipe:{path:$recipe_path,file_sha256:$recipe_sha256},source:{commit:$source_commit,dirty:$source_dirty},configuration:{locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,discovery:$discovery_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir,discovery:$all_tools_discovery,discovery_screenshot:$discovery_screenshot}} else {} end)' \
+               '{schema_version:$schema_version,result:$result,test:$test,recipe:{path:$recipe_path,file_sha256:$recipe_sha256},source:{commit:$source_commit,dirty:$source_dirty},configuration:{display_mode:$display_mode,locale:$locale,palette:$palette,compositor:{width:$compositor_width,height:$compositor_height},terminal:{columns:$terminal_columns,rows:$terminal_rows},viewport_crop:$viewport_crop},toolchain:{contract:$toolchain_contract,versions:$tool_versions},events:{probe:$probe_status,readiness:$readiness_status,orbit:$orbit_status,navigation:$navigation_status,discovery:$discovery_status,workflow:$workflow_status,lifecycle:$lifecycle_status,validation:$validation_status,export:$export_status,cleanup:$cleanup_status},processes:{tui:$tui_status,ghostty:$ghostty_status,weston:$weston_status,owned:$owned_processes_status},viewport:{startup:$viewport_startup,selection:$viewport_selection,orbit:$viewport_orbit,pan:$viewport_pan,zoom:$viewport_zoom,tapered:$viewport_tapered,lofted:$viewport_lofted,workflow:$viewport_workflow},navigation:{transcript:$navigation_transcript,reinforcement_transcript:$workflow_transcript,project_generation_digest_before:$navigation_before,project_generation_digest_after:$navigation_after},workflow:{transcript:$workflow_transcript},cleanup_evidence:{final_image_id:$final_image_id,final_delete_image_id:$final_delete_image_id,deletions:$cleanup_deletions},failure:$failure,artifacts:$artifacts} + (if $test == "production_tui_bracket_foundation" then {bracket:{transcript:$bracket_transcript,steps_dir:$bracket_steps_dir}} else {} end) + (if $test == "production_tui_all_tools_stl_journey" then {all_tools:{transcript:$all_tools_transcript,steps_dir:$all_tools_steps_dir,discovery:$all_tools_discovery,discovery_screenshot:$discovery_screenshot}} else {} end)' \
             >"${MANIFEST}.tmp.$$" && mv -f "${MANIFEST}.tmp.$$" "$MANIFEST"
     else
         write_minimal_manifest
@@ -2712,6 +2751,7 @@ on_exit() {
     [[ -n "$STIMULUS_PID" ]] && terminate_group "$STIMULUS_PID"
     [[ -n "$GHOSTTY_PID" ]] && terminate_group "$GHOSTTY_PID"
     [[ -n "$WESTON_PID" ]] && terminate_group "$WESTON_PID"
+    [[ -n "$PARENT_WAYLAND_ALIAS" ]] && rm -f "${XDG_RUNTIME_DIR}/${PARENT_WAYLAND_ALIAS}"
     if [[ "$success" == 1 && "$final_status" == 0 ]]; then
         owned_processes_status='stopped'
     else
@@ -2742,6 +2782,8 @@ on_exit() {
 
 trap on_exit EXIT INT TERM
 
+[[ "$VISIBLE_MODE" == true || "$VISIBLE_MODE" == false ]] ||
+    die visible_mode_invalid 'THREETERM_GRAPHICAL_VISIBLE must be true or false'
 [[ -z "$path_failure_code" ]] || die "$path_failure_code" "$path_failure_detail"
 [[ -x "$TUI_BINARY" ]] || die tui_binary_unavailable "TUI binary is not executable: $TUI_BINARY"
 mkdir -p "$XDG_RUNTIME_DIR" || die runtime_root_unavailable 'private XDG_RUNTIME_DIR could not be created'

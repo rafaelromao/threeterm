@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e7b94c">
+  <meta name="description" content="ThreeTerm is keyboard-first CAD for hobby 3D printing. Model functional parts in a Linux terminal, preview your changes, and export for your slicer.">
+  <meta property="og:title" content="ThreeTerm | Your next print starts in a terminal">
+  <meta property="og:description" content="Keyboard-first CAD for functional 3D-printed parts. Linux, Ghostty, and a workbench state of mind.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://rafaelromao.github.io/threeterm/">
+  <meta property="og:image" content="https://rafaelromao.github.io/threeterm/assets/screenshots/bracket.png">
+  <title>ThreeTerm | Your next print starts in a terminal</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="wordmark" href="#" aria-label="ThreeTerm home"><svg viewBox="0 0 32 32" width="32" height="32" aria-hidden="true"><path d="m4 9 12-7 12 7v14l-12 7-12-7V9Zm0 0 12 7 12-7M16 16v14"/><path d="M9 12v8l7 4 7-4v-8"/></svg>ThreeTerm<span class="version">v0.1 / MVP</span></a>
+    <nav aria-label="Main navigation">
+      <a href="#workflow">How it works</a>
+      <a href="https://github.com/rafaelromao/threeterm#make-your-first-part">User guide</a>
+      <a class="source-link" href="https://github.com/rafaelromao/threeterm">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> For the keyboard-first maker</p>
+          <h1>Your next print<br>starts in a<br><span>terminal.</span></h1>
+          <p class="hero-intro">A bracket for your desk. A spacer that actually fits. Make functional parts in 3D, without leaving your favorite kind of interface.</p>
+          <a class="button" href="#install">Get ThreeTerm <span aria-hidden="true">↓</span></a>
+          <p class="platform-note">Linux x86_64 · Direct local Ghostty · Open source</p>
+        </div>
+        <figure class="hero-figure">
+          <div class="figure-label"><span>On the bench: an L-bracket</span><span>40 × 20 × 30 mm</span></div>
+          <a class="screenshot-link" href="assets/screenshots/bracket.png" aria-label="Open full-size ThreeTerm bracket screenshot">
+            <img src="assets/screenshots/bracket.png" width="720" height="540" alt="ThreeTerm rendering a solid L-bracket inside a Ghostty terminal, with the part selected in the viewport" fetchpriority="high">
+          </a>
+          <figcaption><span>Viewport/status capture · Scripted session</span><a href="https://github.com/rafaelromao/threeterm/blob/main/docs/assets/screenshots/README.md">Capture notes <span aria-hidden="true">↗</span></a></figcaption>
+          <div class="key-strip" aria-label="Viewport controls"><span><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> Select &amp; orbit</span><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Pan</span><span><kbd>+</kbd><kbd>−</kbd> Zoom</span></div>
+        </figure>
+      </div>
+      <div class="hero-bottom wrap"><span>CAD for the little things worth making.</span><span>Model → Preview → Export → Print</span></div>
+    </section>
+
+    <section class="capabilities wrap" aria-labelledby="capabilities-title">
+      <div class="section-lead">
+        <h2 id="capabilities-title">Useful parts.<br>Explicit dimensions.</h2>
+        <p>Build up solid geometry with named features and repeatable inputs. Keep the editable project, then send an export to the slicer you already use.</p>
+      </div>
+      <dl class="feature-list">
+        <div><dt>Give an idea some volume.</dt><dd>Start with an L-bracket, extrude a profile, or revolve one around an axis. Add or cut material with extrusion.</dd></div>
+        <div><dt>Make the details work.</dt><dd>Join solids, add holes, round or chamfer edges, shell a body, and create draft or lofted geometry.</dd></div>
+        <div><dt>Do it once. Repeat it.</dt><dd>Mirror a feature or create linear and circular patterns with explicit directions, spacing, and counts.</dd></div>
+        <div><dt>Keep it editable.</dt><dd>Committed changes are recorded in a project bundle. Reopen your work, validate the current solid, and export STL, 3MF, or STEP.</dd></div>
+      </dl>
+    </section>
+
+    <section class="workflow" id="workflow" aria-labelledby="workflow-title">
+      <div class="wrap">
+        <div class="workflow-heading"><h2 id="workflow-title">A little typing.<br>A real part.</h2><p>The current MVP uses JSON command drafts. If you enjoy precise inputs and a keyboard-first workflow, pull up a terminal.</p></div>
+        <ol class="steps">
+          <li>
+            <div class="step-heading"><span class="step-number" aria-hidden="true">01</span><h3>Pick your operation.</h3></div>
+            <p>Press <kbd>Ctrl</kbd> + <kbd>P</kbd>, search for <code>bracket</code>, and press <kbd>Enter</kbd> to open its draft.</p>
+            <a class="screenshot-link" href="assets/screenshots/palette.png" aria-label="Open full-size command palette screenshot"><img src="assets/screenshots/palette.png" alt="ThreeTerm command palette listing searchable commands" width="720" height="660" loading="lazy"></a>
+          </li>
+          <li>
+            <div class="step-heading"><span class="step-number" aria-hidden="true">02</span><h3>Try it before you commit.</h3></div>
+            <p>Type dimensions as JSON. <kbd>Ctrl</kbd> + <kbd>V</kbd> previews; <kbd>Ctrl</kbd> + <kbd>Enter</kbd> commits. <kbd>Esc</kbd> cancels.</p>
+            <a class="screenshot-link" href="assets/screenshots/preview.png" aria-label="Open full-size bracket preview screenshot"><img src="assets/screenshots/preview.png" alt="ThreeTerm showing a transient bracket preview before committing the operation" width="720" height="600" loading="lazy"></a>
+          </li>
+          <li class="export-step">
+            <div class="step-heading"><span class="step-number" aria-hidden="true">03</span><h3>Take it to the printer.</h3></div>
+            <p>Validate your feature at the current revision, then export it. Choose print orientation and settings in your own slicer.</p>
+            <div class="part-label"><span>Part file</span><strong>my-bracket.stl</strong><div class="file-rule"></div><span>Dimensions in mm<br>Your slicer. Your printer. Your settings.</span><svg viewBox="0 0 150 100" role="img" aria-label="Outline of a small right-angle bracket"><path d="M30 25 55 13 112 43v15L70 37v37l-25 13-15-8V25Z"/><path d="m30 25 15 8 25-13M45 33v54M70 37l-25 12M70 74l-25 13M70 37l42 21"/></svg></div>
+          </li>
+        </ol>
+        <a class="text-link" href="https://github.com/rafaelromao/threeterm#make-your-first-part">Follow the first-bracket walkthrough <span aria-hidden="true">→</span></a>
+      </div>
+    </section>
+
+    <section class="install-section" id="install" aria-labelledby="install-title">
+      <div class="wrap install-grid">
+        <div><h2 id="install-title">Clear a spot<br>on your PATH.</h2><p>Automatic setup for <strong>Arch Linux, x86_64</strong>. The installer builds ThreeTerm from source and sets up the native geometry and sketch workers.</p><p class="install-detail">This is an early MVP. The verified interactive terminal is <strong>Ghostty 1.3.1-arch2</strong>, in a direct local window. Startup also checks actual terminal capabilities.</p></div>
+        <div class="install-commands">
+          <div class="command-block">
+            <div class="command-heading"><span>Install with curl</span><button type="button" data-copy="curl-command" hidden>Copy command</button></div>
+            <pre><code id="curl-command">sudo -v
+curl -fsSL https://raw.githubusercontent.com/rafaelromao/threeterm/main/install.sh | bash</code></pre>
+          </div>
+          <p class="install-explanation">Installs to <code>~/.local</code>. Runs a full <code>pacman -Syu</code> system upgrade, installs build tools and Ghostty, and builds pinned Rust, OCCT, and libslvs sources. Allow time and several GB of free space.</p>
+          <div class="command-block secondary-command">
+            <div class="command-heading"><span>Prefer a checkout?</span><button type="button" data-copy="make-command" hidden>Copy command</button></div>
+            <pre><code id="make-command">git clone https://github.com/rafaelromao/threeterm.git
+cd threeterm
+sudo -v
+make install</code></pre>
+          </div>
+          <p class="launch-note">Then, in Ghostty: <code>threeterm-tui ~/first-part.threeterm</code><br>Use the <code>new-project</code> palette command to create the bundle.</p>
+          <a class="text-link" href="https://github.com/rafaelromao/threeterm#dependencies">Dependencies, options &amp; other Linux distributions <span aria-hidden="true">→</span></a>
+          <p id="copy-status" class="copy-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="faq wrap" aria-labelledby="faq-title">
+      <h2 id="faq-title">Before you hit Enter.</h2>
+      <div class="faq-list">
+        <details><summary>Will it work in my terminal?</summary><p>The interactive viewport requires a direct local Ghostty window on Linux with a UTF-8 locale. The verified version is 1.3.1-arch2. tmux and SSH sessions are rejected, and startup requires positive graphics, keyboard, mouse, focus, and resize observations. Missing observations can block startup even on a supported build. The headless CLI is available separately.</p></details>
+        <details><summary>How much CAD experience do I need?</summary><p>Start with the bracket walkthrough and change its dimensions. The current interface expects one-line JSON, named features, and explicit coordinates. It has a graphical viewport, but no form-based parameter editor. Read the user guide before trying more involved operations.</p></details>
+        <details><summary>Does it slice or control my printer?</summary><p>No. ThreeTerm models and validates geometry and exports STL, 3MF, or STEP. Use your usual slicer to generate G-code and your normal workflow to send it to your printer.</p></details>
+        <details><summary>Can I automate a model?</summary><p>Yes. The <code>threeterm</code> CLI outputs JSON, and <code>threeterm-mcp</code> exposes the command API over stdio. They include capabilities beyond the current interactive palette, such as history operations and reusable components. Neither provides a terminal viewport.</p></details>
+        <details><summary>Where can I report a rough edge?</summary><p>Open an <a href="https://github.com/rafaelromao/threeterm/issues">issue on GitHub</a> with the command, diagnostic, and terminal version. For startup problems, include whether the window is local and whether a multiplexer is involved.</p></details>
+      </div>
+    </section>
+    <section class="closing wrap"><p>Made for the satisfaction of<br><strong>“I printed that.”</strong></p><a class="button" href="#install">Make your first part <span aria-hidden="true">↑</span></a></section>
+  </main>
+  <footer class="site-footer wrap"><a class="wordmark" href="#">ThreeTerm</a><p>Terminal-native CAD. A work in progress.</p><div><a href="https://github.com/rafaelromao/threeterm">Source &amp; licenses</a><a href="https://github.com/rafaelromao/threeterm#make-your-first-part">User guide</a></div></footer>
+</body>
+</html>

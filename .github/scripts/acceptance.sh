@@ -482,7 +482,7 @@ run_gate release.namespace \
     '
 
 run_gate documentation.workspace \
-    'workspace packages, production entry points, and README documentation agree' \
+    'workspace packages, production entry points, and user/developer documentation agree' \
     bash -e -u -o pipefail -c '
         expected_members=(
             threeterm-host threeterm-occt-worker threeterm-slvs-worker threeterm-tui
@@ -493,20 +493,23 @@ run_gate documentation.workspace \
         test "$(wc -l <<<"${actual_members}" | tr -d " ")" -eq "${#expected_members[@]}"
         for member in "${expected_members[@]}"; do
             grep -Fxq "${member}" <<<"${actual_members}"
-            grep -Fq "${member}" README.md
+            grep -Fq "${member}" docs/development.md
         done
-        grep -Fq "crates/rehearsal" README.md
-        grep -Fq ".github/scripts/acceptance.sh" README.md
-        grep -Fq "direct-Ghostty" README.md
-        grep -Fq "Project Manifest" README.md
-        grep -Fq "Official Interactive Environment" README.md
-        grep -Fq "pinned rootless Arch image" README.md
-        grep -Fq "xterm-ghostty/1.3.1-arch2" README.md
+        grep -Fq "crates/rehearsal" docs/development.md
+        grep -Fq ".github/scripts/acceptance.sh" docs/development.md
+        grep -Fq "direct-Ghostty" docs/development.md
+        grep -Fq "Project Manifest" docs/development.md
+        grep -Fq "Official Interactive Environment" docs/development.md
+        grep -Fq "pinned rootless Arch image" docs/development.md
+        grep -Fq "xterm-ghostty/1.3.1-arch2" docs/development.md
         grep -Fq "threeterm-mcp" README.md
-        grep -Fq "\`threeterm-tui\` owns that interactive surface" README.md
-        grep -Fq "Headless Automation adapters" README.md
-        grep -Fq "CLI and MCP do not provide a graphical viewport" README.md
-        grep -Fq "bash .github/scripts/acceptance.sh" README.md
+        grep -Fq "\`threeterm-tui\` owns that interactive surface" docs/development.md
+        grep -Fq "Headless Automation adapters" docs/development.md
+        grep -Fq "CLI and MCP do not provide a graphical viewport" docs/development.md
+        grep -Fq "bash .github/scripts/acceptance.sh" docs/development.md
+        grep -Fq "docs/development.md" README.md
+        grep -Fq "make install" README.md
+        grep -Fq "install.sh" README.md
         grep -Fq "PODMAN_ROOTLESS: \"1\"" .github/workflows/e2e.yml
         grep -Fq "docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309" .github/workflows/e2e.yml
         grep -Fq "cargo run -p threeterm-cli --bin threeterm" docs/research/rehearsal-evidence/README.md
@@ -579,6 +582,7 @@ while IFS= read -r -d '' artifact; do
     add_artifact "${artifact}"
 done < <(find "${RELIABILITY_EVIDENCE}" -type f -print0 2>/dev/null || true)
 add_artifact "${ROOT}/README.md"
+add_artifact "${ROOT}/docs/development.md"
 add_artifact "${ROOT}/Cargo.toml"
 add_artifact "${ROOT}/Cargo.lock"
 add_artifact "${ROOT}/rust-toolchain-channel.txt"

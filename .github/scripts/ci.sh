@@ -50,6 +50,9 @@ bash tests/three-journey-gate.sh
 echo "==> graphical runner contract"
 bash tests/graphical-runner-contract.sh
 
+echo "==> installer contract"
+bash tests/install-contract.sh
+
 echo "==> release automation contract"
 bash tests/conventional-commits-contract.sh
 bash tests/native-e2e-status-contract.sh

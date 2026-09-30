@@ -1,292 +1,325 @@
 # ThreeTerm
 
-ThreeTerm is a Linux terminal-native parametric CAD product for designing
-functional parts for 3D printing. This repository hosts the Rust implementation
-of the ThreeTerm MVP. The implementation-facing contract is recorded in
-[`docs/mvp-implementation-specification.md`](docs/mvp-implementation-specification.md),
-with issue #58 retained as planning provenance. This README documents the current
-module map and verification commands.
+**Design your next printed part without leaving the terminal.**
 
-## Module map
+ThreeTerm is a Linux, keyboard-first parametric CAD tool for functional 3D-printed
+parts: brackets, spacers, collars, and small enclosures. It renders solid geometry
+inside Ghostty, lets you preview a modeling operation before committing it, and
+exports files for your usual slicer.
 
-The Rust workspace has exactly thirteen member crates, organised per the closed
-OCCT/libslvs architecture decisions (issues #26 and #25). Each member crate
-owns its own per-crate `schema_version()` constant under the spec's
-`Project Manifest` model.
+[Website](https://rafaelromao.github.io/threeterm/) ·
+[Install](#install) · [Make your first part](#make-your-first-part) ·
+[Keyboard controls](#keyboard-controls)
 
-| Member crate                  | Package name               | Responsibility |
-| ----------------------------- | -------------------------- | -------------- |
-| `crates/host`                 | `threeterm-host`           | Rust host that owns the Revision Snapshot, versioned command API, lifecycle, and worker process boundaries. |
-| `crates/workers/occt`         | `threeterm-occt-worker`    | Rust skeleton crate for the disposable OCCT geometry worker boundary. C++ worker code lives outside the workspace. |
-| `crates/workers/slvs`         | `threeterm-slvs-worker`    | Rust skeleton crate for the disposable `libslvs` sketch-solver worker boundary. C++ worker code lives outside the workspace. |
-| `crates/tui`                  | `threeterm-tui`            | Production direct-Ghostty Interactive Modeling executable and keyboard-first adapter for the versioned domain command API. |
-| `crates/cli`                  | `threeterm-cli`            | Headless Automation CLI adapter for the versioned domain command API. |
-| `crates/mcp`                  | `threeterm-mcp`            | MCP adapter exposing the versioned domain command API as agent tools. |
-| `crates/viewport`             | `threeterm-viewport`       | Protocol-Neutral Viewport renderer and projection boundary. |
-| `crates/persistence`          | `threeterm-persistence`    | Canonical Transaction Log (NDJSON-encoded) and sealed `.threeterm/` project bundle. |
-| `crates/theme`                | `threeterm-theme`          | Embedded palette resolution for the five theme families. |
-| `crates/lua-bridge`           | `threeterm-lua-bridge`     | Restricted Lua bridge for keymaps and registered-command automation. |
-| `crates/domain`               | `threeterm-domain`         | Canonical ThreeTerm feature graph and domain model. |
-| `crates/protocol`             | `threeterm-protocol`       | Versioned newline-framed worker protocol shared by host and disposable workers. |
-| `crates/rehearsal`            | `rehearsal`                | Production L-bracket rehearsal and evidence catalog workflow. |
+![ThreeTerm showing a solid L-bracket in the terminal viewport](docs/assets/screenshots/bracket.png)
 
-## Toolchain
+*Compact production viewport/status capture with real geometry and scripted input;
+[capture details](docs/assets/screenshots/README.md).*
 
-The pinned Rust toolchain is recorded in `rust-toolchain.toml` (channel,
-components, targets) and mirrored as a single-line string in
-`rust-toolchain-channel.txt`. CI and local development install the same
-exact toolchain via rustup.
+## Is it for you?
 
-```
-channel = "1.97.1"
-components = ["rustfmt", "clippy"]
-targets = ["x86_64-unknown-linux-gnu"]
-```
+If you like TUIs, explicit dimensions, and repeatable commands, ThreeTerm gives
+you a terminal-native way to build a part and inspect it in 3D.
 
-## Local verification
+**This is an early MVP.** Modeling commands currently take **JSON input** in a
+command palette. Expect to type coordinates and feature IDs rather than fill out
+graphical forms. The interactive environment is a **direct, local Ghostty window
+on Linux**; tmux and SSH attachments are rejected. The verified version is
+**Ghostty `1.3.1-arch2`**. Startup probes actual terminal capabilities too, so a
+matching terminal name alone is not enough.
 
-```sh
-# Format check
-cargo fmt --all -- --check
+### What you can do today
 
-# Lint gate (clippy with warnings-as-errors on every target)
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Compile every member crate
-cargo check --workspace
-
-# Run the fast test suite used by pull-request CI
-bash .github/scripts/test-suite.sh fast
-
-# Run only the opt-in slow tests
-bash .github/scripts/test-suite.sh slow
-
-# Run the complete native E2E suite, including ignored tests
-bash .github/scripts/e2e.sh
-
-# Run the commit-bound production conformance catalog. The command runs every
-# required workflow, replay, registry, worker, licensing, release,
-# documentation, and performance gate. It always writes
-# `target/acceptance-catalog.json`; an unavailable worker or unsigned release
-# gate is recorded as failed and returns a non-zero status.
-bash .github/scripts/acceptance.sh
-
-# Check the three-journey producer/aggregate shell contract without native
-# workers or a graphical runner.
-bash tests/three-journey-gate.sh
-```
-
-## Official Interactive Environment Verification
-
-The real Ghostty launch is intentionally separate from Headless Automation and
-the native Geometric Kernel worker tier. The Official Interactive Environment
-must provide Weston with its headless backend, Ghostty `1.3.1-arch2`, `wtype`, `ydotool`, `wlr-randr`,
-`grim`, Tesseract, ImageMagick, `jq`, Coreutils, and util-linux. The exact
-`--version` output tokens for those tools are recorded in
-`.github/graphical-toolchain.env` by the qualified runner environment.
-
-The named test creates a fresh L-bracket Project Generation with the real OCCT
-worker, launches Interactive Modeling as Ghostty's child, and retains evidence
-under the temporary project root:
-
-```sh
-cargo test -p threeterm-tui --test graphical_launch \
-  production_tui_ghostty_session -- --ignored --exact --test-threads=1
-```
-
-The runner uses `LC_ALL=C.UTF-8`, `LANG=C.UTF-8`, an 800x600 compositor, an
-80x24 terminal, and a top-left 800x480 viewport crop. It fails closed when the
-version contract, compositor, input, screenshot, OCR, positive capability
-probe, visible readiness, or cleanup evidence is missing. It never sets
-`TERM` or `TERM_PROGRAM`; those values must come from real Ghostty.
-
-The runner contract can be checked without graphical dependencies:
-
-```sh
-bash tests/graphical-runner-contract.sh
-```
-
-Each graphical run retains `manifest.json`, PTY input/output logs, TUI and
-compositor diagnostics, startup/orbit/cleanup screenshots, and SHA-256 artifact
-records. The manifest itself is not included in its own hash list.
-
-The manual native E2E workflow remains available for focused test-tier runs.
-The acceptance catalog is the production closure command and records the exact
-source commit, schema and worker identities, gate outcomes, and artifact
-checksums.
-
-### Three-surface geometric equivalence
-
-The three all-tool journey tests can publish one Journey Evidence Report per
-Producer Surface for the geometric equivalence gate. The aggregate is intentionally ignored by the
-ordinary workspace suite because it requires Headless Automation through both
-API and MCP, plus Interactive Modeling in the Official Interactive Environment.
-Run the API and MCP journeys with the native worker, run the TUI journey in the
-Official Interactive Environment, then run the one named aggregate test:
-
-```sh
-export THREETERM_JOURNEY_EVIDENCE_ROOT="$PWD/target/journey-equivalence"
-export THREETERM_JOURNEY_RUN_ID="$(git rev-parse HEAD)-$(date +%s)"
-
-THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
-  cargo test -p threeterm-host --test bracket_base_qualification \
-  e2e_stl_api_all_tools_l_bracket --jobs 1 -- \
-  --include-ignored --exact --test-threads=1
-THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
-  cargo test -p threeterm-mcp --test production_lifecycle \
-  e2e_stl_mcp_all_tools_l_bracket --jobs 1 -- \
-  --include-ignored --exact --test-threads=1
-# Run this command in the Official Interactive Environment.
-THREETERM_REQUIRE_OCCT=1 THREETERM_REQUIRE_REAL_WORKER=1 \
-  cargo test -p threeterm-tui --test graphical_launch \
-  production_tui_all_tools_stl_journey --jobs 1 -- \
-  --include-ignored --exact --test-threads=1
-cargo test -p threeterm-host --test bracket_equivalence \
-  e2e_stl_three_surface_geometric_equivalence --jobs 1 -- \
-  --include-ignored --exact --test-threads=1
-```
-
-The aggregate independently verifies each Producer Surface's retained STL against the frozen
-recipe before comparing dimensions, volume, topology, voids, landmarks, and
-surface samples. It writes `geometric-equivalence.json` on pass or failure;
-all journey and aggregate reports are stored under the run ID within the
-configured evidence root;
-raw STL bytes, facet order, generated identities, timestamps, paths, and
-transaction IDs are not equivalence keys.
-
-### Three-journey CI gate
-
-Pull-request CI runs `.github/workflows/three-journey.yml`. The API and MCP
-journeys run in the pinned rootless Arch container, while the TUI journey runs
-only on a self-hosted runner labelled `threeterm-graphical` with
-`THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT` configured. The jobs share the run ID,
-recipe binding, native-worker bundle, and retained evidence before the aggregate
-job writes `target/three-journey-gate/catalog.json`.
-
-Run the same orchestration locally when the native workers and qualified
-graphical environment are available:
-
-```sh
-THREETERM_JOURNEY_RUN_ID="$(git rev-parse HEAD)-$(date +%s)" \
-  bash .github/scripts/three-journey-gate.sh
-```
-
-For a narrated run with the TUI visible on your desktop, launch the showcase
-from a Wayland desktop terminal:
-
-```sh
-bash .github/scripts/three-journey-showcase.sh
-```
-
-The API and MCP test output streams in the launch terminal. During the TUI
-journey, a fullscreen nested Weston/Ghostty window shows the scripted
-keyboard-first modeling flow, including previews, commits, navigation, and STL
-export. The same evidence catalog and per-surface logs are retained under
-`target/three-journey-showcase` by default; set
-`THREETERM_THREE_JOURNEY_ROOT` to choose another location.
-
-Each producer retains stdout, stderr, attempt metadata, journey reports,
-coverage reports, native-worker identities, and geometric comparison output
-under `target/three-journey-gate`. The timeout defaults to 900 seconds per
-journey and can be adjusted with
-`THREETERM_THREE_JOURNEY_TIMEOUT_SECONDS`; process-group cleanup grace is
-controlled by `THREETERM_THREE_JOURNEY_KILL_GRACE_SECONDS`. Missing jobs are
-recorded as `unrun` and prerequisite failures as `prerequisite_skipped`; neither
-can produce a passing catalog.
-
-## Compatibility contract
-
-The interactive MVP supports only a direct local `xterm-ghostty/1.3.1-arch2`
-attachment with the positively probed Terminal Capability Vector described as
-the Official Interactive Environment. `threeterm-tui` owns that interactive surface;
-`threeterm` and `threeterm-mcp` are Headless Automation adapters. The
-CLI, MCP, and TUI all consume the same versioned domain command registry and Project
-Manifest contract, but CLI and MCP do not provide a graphical viewport or
-replace the direct-Ghostty capability gate.
-
-The native conformance workflow uses the pinned rootless Arch image declared in
-`.github/workflows/e2e.yml`. An unsigned release runbook is expected to block
-public release; the acceptance catalog records that block instead of treating
-it as a passing release gate.
-
-## Commit and release workflow
-
-Pull request titles use Conventional Commits, including an optional scope, for
-example `feat(host): add a modeling command` or
-`fix(persistence): preserve project identity`. The semantic title check accepts
-the standard release types used by this repository. Use a scope naming the
-affected crate, product surface, or automation area (`host`, `mcp`, `tui`,
-`persistence`, `ci`, `release`); omit it for cross-cutting changes. Release
-Please groups the merged commit history into a single release PR and carries
-scopes into the generated changelog. The release manifest starts at `0.1.0`.
-The `version.txt` marker, workspace package version, and local package entries
-in `Cargo.lock` are updated together in the generated release PR. Before
-publishing a merged release PR, `.github/scripts/release.sh verify` checks the
-signed release-namespace gate; an unsigned or stale gate stops tag and GitHub
-Release creation.
-
-## Test suites
-
-`#[ignore = "slow: ..."]` identifies a long-running test. Pull-request CI
-runs the fast suite with native worker construction disabled. The manually
-triggered native E2E workflow runs the complete suite, including ignored tests,
-against the immutable OCCT and libslvs workers. The slow suite remains a
-smaller local opt-in that runs only ignored tests.
-
-The fast suite retains representative coverage for each product boundary:
-
-| Behavior | Fast coverage |
+| Job | Interactive commands |
 | --- | --- |
-| Geometric Kernel operations | Small real-OCCT operation tests in `crates/workers/occt/tests/worker_integration.rs` and CLI operation tests |
-| Headless Automation | CLI command, error, save/load, export, and schema tests |
-| Interactive Modeling | TUI interaction, routing, cleanup, and viewport tests |
-| MCP adapter | MCP command and component-instance tests |
-| Canonical Transaction Log and recovery | persistence, host, migration, and historical-recovery tests |
-| Protocol and worker supervision | protocol framing, registry, worker, and supervisor tests |
-| Sketches, fit relationships, and viewport projection | sketch-solve, host fit-dimension, persistence fit-dimension, and viewport tests |
-| Rehearsal contract | registered schema, CLI argument, and fast timing-comparison tests |
+| Start with a simple solid | `bracket`, additive/subtractive `extrude`, `revolve` |
+| Join parts | `boolean-fuse` |
+| Finish a part | `fillet`, `chamfer`, `hole`, `shell`, `draft`, `loft` |
+| Repeat geometry | `mirror`, `linear-pattern`, `circular-pattern` |
+| Solve a dimensioned sketch | `sketch-solve` with explicit entities and constraints |
+| Keep and reopen your work | `new-project`, `save`, `load` |
+| Prepare a file for printing or CAD exchange | `validate`, `export` to STL, 3MF, or STEP |
 
-The slow suite repeats complete release candidates, cross-worker workflows, and
-native adversarial or exhaustive geometry checks. It adds confidence in their
-composition without delaying every pull request.
+The viewport supports feature selection, orbit, pan, and zoom. Five built-in
+palettes are available. Project changes are recorded in a durable transaction
+log with integrity-checked generations and bounded recovery.
 
-## Continuous integration
+The CLI also exposes operations such as boolean cut/common, history edits,
+undo/redo, fit dimensions, and reusable components. A command appearing in the
+shared registry does **not** guarantee that the current TUI can execute it; some
+palette entries are discovery-only. There are no documented TUI undo/redo
+shortcuts in this version.
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull
-request targeting `main`, with a ten-minute job timeout. The workflow:
+ThreeTerm creates geometry and exports it. Use your existing slicer to choose
+orientation, supports, infill, and printer settings and generate G-code.
 
-1. checks out the workspace,
-2. restores Cargo dependencies and build artifacts,
-3. runs `.github/scripts/ci.sh` with native worker construction disabled.
+## Install
 
-The CI script installs the pinned Rust toolchain when necessary, then runs
-`cargo check`, `cargo fmt --check`, `cargo clippy -D warnings`, and the fast
+### Quick install: Arch Linux, x86_64
+
+You need a desktop session, Bash, curl, tar, and permission to install packages.
+Authenticate sudo in your terminal first, then run:
+
+```sh
+sudo -v
+curl -fsSL https://raw.githubusercontent.com/rafaelromao/threeterm/main/install.sh | bash
+```
+
+This is a **source build**, not a prebuilt binary download. It installs system
+dependencies with `pacman -Syu`, including Ghostty, installs the pinned Rust
+toolchain through rustup, builds pinned OCCT and libslvs sources, and installs
+the three application commands plus both native workers and their libraries.
+`pacman -Syu` performs a full system upgrade. The build can take a substantial
+amount of time and several GB of free space, especially on the first run.
+
+The default destination is `~/.local`. Add its commands to your shell's PATH if
+needed:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Put that line in your shell's startup file to keep it across sessions. Open
+Ghostty and launch the interactive tool there. The installer uses the repository
+version of Ghostty; the currently verified application environment remains
+`1.3.1-arch2`.
+
+### Install from a checkout
+
+Git and make must be available before these commands. On Arch, install them with
+`sudo pacman -Syu --needed git make` if needed.
+
+```sh
+git clone https://github.com/rafaelromao/threeterm.git
+cd threeterm
+sudo -v
+make install
+```
+
+Both install methods use the same installer. Options:
+
+```sh
+# Build with four parallel jobs and a different user-owned prefix.
+make install JOBS=4 PREFIX="$HOME/apps/threeterm"
+
+# System dependencies already present? Skip package management.
+make install INSTALL_FLAGS=--no-system-packages
+
+# The curl bootstrap accepts the same options.
+curl -fsSL https://raw.githubusercontent.com/rafaelromao/threeterm/main/install.sh \
+  | bash -s -- --jobs 4 --prefix "$HOME/apps/threeterm"
+```
+
+`THREETERM_REF` selects the bootstrap's source branch, tag, or commit (default:
+`main`). `THREETERM_CACHE_DIR` changes its download cache (default:
+`${XDG_CACHE_HOME:-~/.cache}/threeterm`). `THREETERM_BUILD_ROOT` changes the reusable
+build directory; checkout installs use `target/install` by default. Re-running
+the installer reuses completed native dependency builds.
+
+### Dependencies
+
+Automatic system package setup targets **Arch Linux on x86_64**. On other x86_64
+Linux distributions, install the system dependencies yourself and use
+`--no-system-packages`; those environments are not qualified by the interactive
 test suite.
 
-`.github/workflows/e2e.yml` retains the rootless Arch container and immutable
-source-built OCCT/libslvs workers. Its native acceptance catalog and complete
-ignored E2E suite run only for a Release Please pull request carrying the
-`autorelease: pending` label, or when manually dispatched. The full suite is
-run through `.github/scripts/e2e.sh`; ordinary feature PRs run only fast CI.
-Release Please dispatches both native E2E workflows at the release branch after
-updating the PR, because its `GITHUB_TOKEN` cannot trigger follow-up PR events.
-It waits for both runs and publishes a `Release E2E gate` status check on the
-release PR commit, so the slow results appear with that PR's checks.
-That dispatch expects the acceptance catalog to pass, preserving the signed
-release-namespace gate; the manual run below expects the current unsigned-gate
-failure unless `passed` is selected after the gate is signed.
-Maintainers can also run the workflows manually:
+| Dependency | Purpose | How it is installed |
+| --- | --- | --- |
+| Ghostty | Terminal graphics and keyboard/mouse input for the TUI | Arch `ghostty`; qualified version `1.3.1-arch2` |
+| Bash, coreutils, tar, util-linux, glibc, C/C++ runtime | Installer, launchers, `stty`, process execution, and native shared libraries | Arch base system plus `base-devel` |
+| GCC/G++, make, CMake | Build the two native CAD workers and their dependencies | Arch `base-devel cmake` |
+| Git, curl, CA certificates | Download pinned source and Rust | Arch `git curl` and their dependencies |
+| jq | Installer metadata and optional command-schema inspection | Arch `jq` |
+| FreeType, Fontconfig, X11 development files | Native source-build dependencies | Arch `freetype2 fontconfig libx11` |
+| Rust **1.97.1** and Cargo | Compile ThreeTerm | rustup, pinned by `rust-toolchain-channel.txt` |
+| Open CASCADE / OCCT **7.9.2** | Construct, validate, render, and export solids | Built from commit `c5f20409c52bf8f658314d205a0e5d6f0be0969c` |
+| SolveSpace **3.2** / libslvs | Solve sketch constraints | Built from commit `27b6a080c8b669421bd4d444650c3b8eddec5687`, including submodules |
+| Lua | Embedded scripting support used by the application | Compiled through Cargo's vendored Lua dependency; no system Lua needed |
+
+OCCT and libslvs libraries are bundled under `<prefix>/lib/threeterm`; the
+installed launchers configure their worker and library paths. You can remove the
+source/build cache after a successful install. Rust, Git, and CMake are needed
+for rebuilding, not for day-to-day modeling. A slicer is a separate tool and is
+not installed by ThreeTerm.
+
+Weston, screenshot/OCR tools, and the repository's graphical test harness are
+development dependencies, not requirements for ordinary modeling.
+
+## Make your first part
+
+This example makes a **40 × 20 × 30 mm L-bracket with 3 mm walls**, then exports
+an STL. Dimensions use millimetres. Run these shell commands in a direct local
+Ghostty window with a UTF-8 locale:
 
 ```sh
-gh workflow run e2e.yml --ref main -f expected_catalog_result=failed
-gh workflow run three-journey.yml --ref main
+threeterm new-project "$HOME/first-bracket.threeterm"
+threeterm-tui "$HOME/first-bracket.threeterm"
 ```
 
-`.github/workflows/release-please.yml` opens or updates the release PR after
-commits reach `main`. `.github/workflows/semantic-pull-request.yml` validates
-PR titles so the release notes have Conventional Commit types and scopes to
-interpret.
+The project is a **directory bundle**, even though its name ends in `.threeterm`.
+Choose a new, unused path for `new-project`.
 
-<a href="https://github.com/rafaelromao/sandman">
-  <img src="https://raw.githubusercontent.com/rafaelromao/sandman/main/assets/badge-built-with-sandman.svg" alt="Built with Sandman" width="154" />
-</a>
+### 1. Create the bracket
+
+Press **Ctrl+P**, type `bracket`, and press **Enter**. Type the following as one
+line in the command draft:
+
+```json
+{"bracket_id":"my-bracket","length":40,"width":20,"height":30,"thickness":3}
+```
+
+Press **Ctrl+V** to preview. Once the preview is ready, press **Ctrl+Enter** to
+commit. **Escape** cancels a draft or preview. The TUI supplies the active project
+path and revision automatically.
+
+You can also start from a rectangular profile with `extrude`, for example:
+
+```json
+{"feature_id":"spacer","profile":[[0,0],[20,0],[20,10],[0,10]],"height":3,"mode":"additive"}
+```
+
+### 2. Inspect and validate
+
+Use the arrow keys to select features and orbit the view, `W/A/S/D` or
+`H/J/K/L` to pan, and `+` / `-` to zoom.
+
+Open the palette again, select `validate`, and enter:
+
+```json
+{"feature_id":"my-bracket"}
+```
+
+Preview with **Ctrl+V**, then commit with **Ctrl+Enter**. The TUI requires
+successful validation of the **same feature at the current revision** before
+export. A subsequent modeling change means you must validate again.
+
+### 3. Export for your slicer
+
+Choose `export` in the palette and enter:
+
+```json
+{"feature_id":"my-bracket","formats":["stl"],"output_dir":"./prints","tessellation_deflection":0.1,"override_warnings":false,"accept_stale_geometry":false}
+```
+
+Preview, then commit. The STL is written under `./prints`, relative to the
+directory from which you launched ThreeTerm. Open it in your slicer and check
+dimensions and print orientation. Lower tessellation deflection gives a finer
+mesh, which can be useful for curved parts.
+
+Committed modeling commands persist the project. Quit with **q** when no command
+draft is active, then reopen with the same `threeterm-tui` command. Back up the
+whole bundle directory if you want to preserve editable work; an STL alone does
+not retain modeling history.
+
+## Keyboard controls
+
+| Input | Action |
+| --- | --- |
+| **Ctrl+P** | Open the command palette |
+| Text / **Backspace** | Search the palette or edit the JSON draft |
+| **Arrows** in the palette | Move between matching commands |
+| **Enter** in the palette | Open the selected command's draft |
+| **Ctrl+V** | Preview the current draft |
+| **Ctrl+Enter** | Commit a ready preview; if no preview exists, request one first |
+| **Escape** | Dismiss the palette or cancel the draft/preview |
+| **Arrows** in the viewport | Navigate feature selection and orbit |
+| **W/A/S/D** | Pan up/left/down/right |
+| **H/J/K/L** | Pan left/down/up/right |
+| **+** / **=**, **-** / **_** | Zoom in/out |
+| Left click | Pick viewport geometry when command input is inactive |
+| **q** or **Ctrl+C**, with no command input active | Quit and restore the terminal |
+
+The current draft editor appends characters and supports Backspace. It is not a
+full text editor: Enter does not submit JSON, and arrow keys do not move a text
+cursor. Type JSON on one line; multiline/bracketed paste is not a supported
+editing workflow.
+
+## Themes
+
+```sh
+THREETERM_PALETTE=gruvbox threeterm-tui "$HOME/first-bracket.threeterm"
+```
+
+Available names: `catppuccin` (default), `tokyo-night`, `evergreen`, `gruvbox`, and
+`sandman-light`.
+
+## Screenshots
+
+![ThreeTerm command palette output with searchable modeling commands](docs/assets/screenshots/palette.png)
+
+*Choose a command with Ctrl+P, search, then Enter.*
+
+![ThreeTerm showing a bracket command preview before committing](docs/assets/screenshots/preview.png)
+
+*Preview the geometry before committing. See [capture details](docs/assets/screenshots/README.md).*
+
+## When something goes wrong
+
+- **Viewport will not start:** use a local Ghostty window, outside tmux and SSH,
+  with a UTF-8 locale. Startup returns a structured diagnostic on stderr when
+  identity, transport, or positively observed capabilities are missing. The
+  current startup probe requires keyboard, mouse, focus, and resize observations;
+  even a supported Ghostty build can fail if those observations are absent.
+- **Invalid JSON or rejected preview:** correct the draft's inputs, then preview
+  again. Use **Escape** to discard it. Previewing does not change the project.
+- **Export is blocked:** validate the chosen feature again after your last edit.
+  Stale last-valid geometry does not count as a current validated solid.
+- **Install fails:** check free disk space, network access, and the compiler/CMake
+  output. For automatic package setup, run `sudo -v` first. The installer fails
+  if either native worker cannot complete its handshake.
+- **`threeterm` does not show a viewport:** that command is the JSON-output CLI.
+  Start **`threeterm-tui`** for interactive modeling.
+
+For scripts and integrations, `threeterm --machine list` returns the registered
+command schemas. With jq, inspect a specific command using:
+
+```sh
+threeterm --machine list | jq '.[] | select(.name == "extrude") | .request_schema'
+```
+
+`threeterm-mcp` provides the same command API to MCP clients over stdio. Neither
+the CLI nor MCP supplies the interactive viewport.
+
+### A bracket from shell commands
+
+The same simple part can be built and exported headlessly. These commands also
+give you a way to check the native geometry installation when troubleshooting
+interactive startup:
+
+```sh
+threeterm new-project "$HOME/cli-bracket.threeterm"
+threeterm --machine bracket "$HOME/cli-bracket.threeterm" \
+  --bracket-id my-bracket --length 40 --width 20 --height 30 --thickness 3
+threeterm --machine export --bundle "$HOME/cli-bracket.threeterm" \
+  --feature-id my-bracket --formats stl --output-dir ./prints \
+  --tessellation-deflection 0.1
+```
+
+Each command writes a JSON response. Export performs its geometry checks; the
+TUI's separate visible-validation requirement applies to the interactive workflow.
+
+## Uninstall
+
+From a checkout:
+
+```sh
+make uninstall
+# Match the prefix if you installed somewhere else:
+make uninstall PREFIX="$HOME/apps/threeterm"
+```
+
+For a curl installation, run `scripts/install-local.sh --uninstall` from its
+retained source directory, with `--prefix` if you changed it. Uninstall removes
+the ThreeTerm commands and runtime bundle. It retains projects, system packages,
+Rust, and build caches.
+
+## More information
+
+- [Development and verification guide](docs/development.md)
+- [Implementation specification](docs/mvp-implementation-specification.md)
+- [Website and GitHub Pages setup](docs/website.md)
+- [Report a problem](https://github.com/rafaelromao/threeterm/issues)
+
+ThreeTerm's first-party code is MIT/Apache-2.0 except for the GPL-3.0-only libslvs
+worker. OCCT uses LGPL-2.1 with its additional exception. See [LICENSE](LICENSE),
+[libslvs policy](licenses/libslvs.json), and the worker notices for details.

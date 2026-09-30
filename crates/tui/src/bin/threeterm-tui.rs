@@ -167,6 +167,7 @@ impl InteractiveTerminal for ProcessTerminal {
     fn prepare(&mut self) -> io::Result<()> {
         let original = std::process::Command::new("stty")
             .arg("-g")
+            .stdin(Stdio::inherit())
             .stderr(Stdio::null())
             .output()
             .map_err(io::Error::other)?;
@@ -265,6 +266,7 @@ impl Drop for ProcessTerminal {
 fn terminal_cells() -> (u32, u32) {
     let output = std::process::Command::new("stty")
         .arg("size")
+        .stdin(Stdio::inherit())
         .stderr(Stdio::null())
         .output();
     let Ok(output) = output else {

@@ -16,7 +16,7 @@ use threeterm_protocol::command_execution::ExecutionError;
 use threeterm_protocol::diagnostic::DiagnosticCode;
 use threeterm_protocol::schema::{
     EXTRUDE_COMMAND_ID, LOAD_COMMAND_ID, NEW_PROJECT_COMMAND_ID, SAVE_COMMAND_ID,
-    TIMELINE_COMMAND_ID, VALIDATE_COMMAND_ID,
+    VALIDATE_COMMAND_ID,
 };
 use threeterm_protocol::schema_validator::validate as validate_schema;
 
@@ -55,6 +55,19 @@ fn command_response(
     validate_schema(&schema.response_schema, &response)
         .unwrap_or_else(|error| panic!("response for {} violates its schema: {error}", command.0));
     response
+}
+
+fn assert_brep_integrity_failure(error: &ExecutionError<HostError>, feature_id: &str) {
+    let ExecutionError::Handler(HostError::Persistence(
+        threeterm_persistence::BundleError::Invalid(detail),
+    )) = error
+    else {
+        panic!("tampered BREP must fail canonical integrity checks, got {error:?}");
+    };
+    assert!(detail.contains(feature_id));
+    assert!(detail.contains("failed integrity verification"));
+    let diagnostic = domain_execution_diagnostic(error);
+    assert_eq!(diagnostic.code, DiagnosticCode::PersistenceFailure);
 }
 
 fn new_project(host: &Host, parent: &std::path::Path) -> std::path::PathBuf {
@@ -302,11 +315,7 @@ fn validate_known_good_solid_reports_bound_success_after_reopen() {
         LOAD_COMMAND_ID,
         json!({"bundle_path": bundle.to_string_lossy()}),
     );
-    let timeline = command_response(
-        &reopened,
-        TIMELINE_COMMAND_ID,
-        json!({"bundle_path": bundle.to_string_lossy()}),
-    );
+    let history = reopened.history(&bundle).expect("active history reloads");
     let response = command_response(
         &reopened,
         VALIDATE_COMMAND_ID,
@@ -318,7 +327,10 @@ fn validate_known_good_solid_reports_bound_success_after_reopen() {
     assert_eq!(response["status"], "ok");
     assert_eq!(response["valid"], true);
     assert_eq!(response["feature_id"], "arm-x");
-    assert_eq!(response["revision_id"], timeline["active_revision"]);
+    assert_eq!(
+        response["revision_id"],
+        history.active_snapshot().revision_id
+    );
     assert_eq!(response["feature_graph_hash"], loaded["feature_graph_hash"]);
     assert_eq!(response["revision_hash"], loaded["revision_hash"]);
     assert!(
@@ -386,13 +398,7 @@ fn validate_rejects_a_kernel_valid_brep_with_wrong_authenticated_provenance() {
             }),
         )
         .expect_err("a valid but wrong BREP is refused");
-    let ExecutionError::Handler(HostError::BrepInvalid { detail, .. }) = error else {
-        panic!("wrong BREP must report BrepInvalid, got {error:?}");
-    };
-    assert!(
-        detail.contains("authenticated BREP provenance mismatch") && detail.contains("arm-x"),
-        "refusal identifies the provenance mismatch: {detail}"
-    );
+    assert_brep_integrity_failure(&error, "arm-x");
     assert!(
         !parent.join("output").exists(),
         "validation produces no export artifact"
@@ -402,8 +408,8 @@ fn validate_rejects_a_kernel_valid_brep_with_wrong_authenticated_provenance() {
 }
 
 #[test]
-fn validate_corrupt_committed_brep_is_refused_as_brep_invalid() {
-    if required_fixture_worker("validate_corrupt_committed_brep_is_refused_as_brep_invalid")
+fn validate_corrupt_committed_brep_is_refused_by_canonical_integrity() {
+    if required_fixture_worker("validate_corrupt_committed_brep_is_refused_by_canonical_integrity")
         .is_none()
     {
         eprintln!("validate: no OCCT worker binary found; CI runs this production path");
@@ -428,11 +434,10 @@ fn validate_corrupt_committed_brep_is_refused_as_brep_invalid() {
         LOAD_COMMAND_ID,
         json!({"bundle_path": bundle.to_string_lossy()}),
     );
-    assert_eq!(loaded["status"], "ok");
+    assert_eq!(loaded["revision_hash"], extruded["revision_hash"]);
 
-    // Corrupt the committed bytes after the reopen load with no second
-    // load before validation: digit-only distortion keeps the BREP
-    // framing parseable while the kernel check must fail the shape.
+    // Digit-only distortion keeps the BREP framing parseable, but its bytes
+    // must be authenticated before the kernel can validate the shape.
     let brep_path = bundle.join("brep/arm-x.brep");
     let bytes = std::fs::read(&brep_path).expect("committed BREP reads");
     let midpoint = bytes.len() / 2;
@@ -469,18 +474,7 @@ fn validate_corrupt_committed_brep_is_refused_as_brep_invalid() {
             }),
         )
         .expect_err("fatal current-geometry defect is refused");
-    let ExecutionError::Handler(HostError::BrepInvalid { detail, .. }) = error else {
-        panic!("corrupt BREP must report BrepInvalid, got {error:?}");
-    };
-    assert!(
-        detail.contains("BRepCheck_Analyzer"),
-        "refusal carries the kernel diagnostic: {detail}"
-    );
-    let diagnostic = domain_command_diagnostic(&HostError::BrepInvalid {
-        request_id: None,
-        detail: detail.clone(),
-    });
-    assert_eq!(diagnostic.code, DiagnosticCode::BrepInvalid);
+    assert_brep_integrity_failure(&error, "arm-x");
     assert!(
         !output.exists() && !parent.join("arm-x.stl").exists(),
         "refusal produces no export output"
@@ -581,13 +575,7 @@ fn validate_selected_current_solid_end_to_end() {
             }),
         )
         .expect_err("corrupt geometry is refused");
-    assert!(
-        matches!(
-            error,
-            ExecutionError::Handler(HostError::BrepInvalid { .. })
-        ),
-        "corrupt geometry reports BrepInvalid, got {error:?}"
-    );
+    assert_brep_integrity_failure(&error, "arm-x");
 
     // Phase 3: unavailable geometry is reported explicitly, never valid.
     std::fs::remove_file(&brep_path).expect("corrupted BREP deletes");

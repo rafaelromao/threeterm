@@ -934,7 +934,8 @@ fn production_mcp_saves_restarts_loads_validates_and_exports_l_bracket_with_inde
         json!({
             "bundle_path": project.to_string_lossy(),
             "feature_id": "mcp-lifecycle-save-marker",
-            "kind": "lifecycle-marker",
+            "kind": "checkpoint",
+            "expected_revision": bracket["revision_hash"],
         }),
     );
     let saved = structured_tool_success(&saved, "save");

@@ -71,6 +71,8 @@ end
 raise "release-please action/config is missing" unless release_action &&
   release_action.dig("with", "config-file") == "release-please-config.json" &&
   release_action.dig("with", "manifest-file") == ".release-please-manifest.json"
+raise "release-please must support an approval-free token with a built-in-token fallback" unless
+  release_action.dig("with", "token") == "${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}"
 gate_step = release.dig("jobs", "release-please", "steps").find do |step|
   step["run"].to_s.include?("release.sh verify")
 end

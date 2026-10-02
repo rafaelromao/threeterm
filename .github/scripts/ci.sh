@@ -6,6 +6,7 @@
 # a source build of OCCT and libslvs. Each step exits non-zero on failure.
 
 set -euo pipefail
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 
 cd "$(dirname "$0")/../.."
 
@@ -56,6 +57,7 @@ bash tests/install-contract.sh
 echo "==> release automation contract"
 bash tests/conventional-commits-contract.sh
 bash tests/native-e2e-status-contract.sh
+bash tests/acceptance-catalog.sh
 bash tests/release-please-contract.sh
 bash tests/release-e2e-workflow-contract.sh
 bash tests/release-e2e-dispatch-contract.sh

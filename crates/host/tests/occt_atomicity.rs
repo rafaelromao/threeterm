@@ -24,7 +24,7 @@ use threeterm_occt_worker::{
     BooleanCommonRequest, BooleanCutRequest, BooleanFuseRequest, BooleanPatternRequest,
     ChamferRequest, CircularPatternRequest, DraftRequest, ExtrudeMode, ExtrudeRequest,
     FilletRequest, HoleRequest, LinearPatternRequest, LoftRequest, MirrorRequest, Operation,
-    ShellRequest,
+    SelectedEdgeContext, ShellRequest,
 };
 use threeterm_persistence::{
     Bundle, CanonicalExtrudeIntent, CanonicalIntent, EXTRUDE_INTENT_SCHEMA_VERSION,
@@ -1974,6 +1974,66 @@ fn chamfer_request(label: &str, feature_id: &str, base_path: &Path) -> ChamferRe
         .with_feature_id(feature_id)
 }
 
+fn selected_edge_context(
+    worker: &threeterm_occt_worker::OcctWorker,
+    base_path: &Path,
+    feature_id: &str,
+    source_revision_id: &str,
+    role: &str,
+) -> SelectedEdgeContext {
+    let inspection = worker
+        .inspect_edges(
+            unique_request_id("inspect-finishing-edge"),
+            base_path,
+            feature_id,
+            source_revision_id,
+            json!({
+                "semantic_id": format!("{feature_id}-edge"),
+                "source_feature_id": feature_id,
+                "source_revision_id": source_revision_id,
+                "source_edge_id": format!("{feature_id}-edge"),
+                "role": role,
+                "midpoint": [0.0, 0.0, 0.0],
+                "tangent": [1.0, 0.0, 0.0],
+                "length": 1.0,
+            }),
+        )
+        .expect("native edge inspection succeeds");
+    let candidate = inspection
+        .edge_candidates
+        .iter()
+        .find(|candidate| {
+            candidate.role == role
+                && inspection
+                    .edge_candidates
+                    .iter()
+                    .filter(|other| {
+                        other.midpoint == candidate.midpoint
+                            && other.tangent == candidate.tangent
+                            && other.length == candidate.length
+                    })
+                    .count()
+                    == 1
+        })
+        .expect("native inspection provides unambiguous edge evidence");
+    SelectedEdgeContext {
+        semantic_id: format!(
+            "edge-{}",
+            sha256_hex(
+                &serde_json::to_vec(&(candidate.midpoint, candidate.tangent, candidate.length))
+                    .expect("edge evidence serializes")
+            )
+        ),
+        source_feature_id: candidate.source_feature_id.clone(),
+        source_revision_id: candidate.source_revision_id.clone(),
+        source_edge_id: candidate.source_edge_id.clone(),
+        role: candidate.role.clone(),
+        midpoint: candidate.midpoint,
+        tangent: candidate.tangent,
+        length: candidate.length,
+    }
+}
+
 fn hole_request(
     label: &str,
     feature_id: &str,
@@ -2061,6 +2121,13 @@ fn fillet_commits_brep_into_a_new_revision() {
 
     let base_brep = committed_brep_path(&root, "fillet-commit-base-1");
     let request = fillet_request("fillet-commit", "fillet-commit-1", &base_brep)
+        .with_selected_edge(selected_edge_context(
+            &worker,
+            &base_brep,
+            "fillet-commit-base-1",
+            &base_view.snapshot.revision_hash,
+            "outer-perimeter",
+        ))
         .with_output_path(root.join("stage"), "fillet-commit.brep");
     let view = host
         .fillet(&root, request, &worker)
@@ -2100,6 +2167,13 @@ fn chamfer_commits_brep_into_a_new_revision() {
 
     let base_brep = committed_brep_path(&root, "chamfer-commit-base-1");
     let request = chamfer_request("chamfer-commit", "chamfer-commit-1", &base_brep)
+        .with_selected_edge(selected_edge_context(
+            &worker,
+            &base_brep,
+            "chamfer-commit-base-1",
+            &base_view.snapshot.revision_hash,
+            "outer-perimeter",
+        ))
         .with_output_path(root.join("stage"), "chamfer-commit.brep");
     let view = host
         .chamfer(&root, request, &worker)
@@ -2347,7 +2421,7 @@ fn chamfer_brep_invalid_preserves_canonical_state() {
 }
 
 #[test]
-fn fillet_then_chamfer_chain_reports_an_atomic_geometry_limitation() {
+fn fillet_then_chamfer_chain_commits_one_resolved_edge_at_each_step() {
     let Some(worker) = locate_worker() else {
         return;
     };
@@ -2364,19 +2438,33 @@ fn fillet_then_chamfer_chain_reports_an_atomic_geometry_limitation() {
 
     let base_brep = committed_brep_path(&root, "chain-base-1");
     let fillet_request = fillet_request("chain-fillet", "chain-fillet-1", &base_brep)
+        .with_selected_edge(selected_edge_context(
+            &worker,
+            &base_brep,
+            "chain-base-1",
+            &base_view.snapshot.revision_hash,
+            "outer-perimeter",
+        ))
         .with_output_path(root.join("stage"), "chain-fillet.brep");
     let fillet_view = host.fillet(&root, fillet_request, &worker).expect("fillet");
     assert_eq!(fillet_view.result.status, "ok");
 
     let fillet_brep = committed_brep_path(&root, "chain-fillet-1");
     let chamfer_request = chamfer_request("chain-chamfer", "chain-chamfer-1", &fillet_brep)
+        .with_selected_edge(selected_edge_context(
+            &worker,
+            &fillet_brep,
+            "chain-fillet-1",
+            &fillet_view.snapshot.revision_hash,
+            "fillet-transition",
+        ))
         .with_output_path(root.join("stage"), "chain-chamfer.brep");
     let (manifest_before_chamfer, log_before_chamfer) = snapshot_files(&root);
-    let result = host.chamfer(&root, chamfer_request, &worker);
-    assert!(
-        matches!(result, Err(HostError::UnsupportedGeometry { .. })),
-        "got {result:?}"
-    );
+    let fillet_bytes = fs::read(&fillet_brep).expect("fillet BREP reads before chamfer");
+    let chamfer_view = host
+        .chamfer(&root, chamfer_request, &worker)
+        .expect("chamfer commits the resolved transition edge");
+    assert_eq!(chamfer_view.result.status, "ok");
 
     assert_ne!(
         fillet_view.snapshot.revision_hash,
@@ -2384,14 +2472,18 @@ fn fillet_then_chamfer_chain_reports_an_atomic_geometry_limitation() {
     );
 
     let reloaded = Host::new().load(&root).expect("reloads");
-    assert_eq!(fillet_view.snapshot, reloaded);
+    assert_eq!(chamfer_view.snapshot, reloaded);
+    assert_ne!(fillet_view.snapshot.revision_hash, reloaded.revision_hash);
+    let (manifest_after_chamfer, log_after_chamfer) = snapshot_files(&root);
+    assert_ne!(manifest_before_chamfer, manifest_after_chamfer);
+    assert!(log_after_chamfer.starts_with(&log_before_chamfer));
     assert_eq!(
-        snapshot_files(&root),
-        (manifest_before_chamfer, log_before_chamfer)
+        fs::read(&fillet_brep).expect("fillet BREP remains"),
+        fillet_bytes
     );
     assert!(
-        !root.join("brep/chain-chamfer-1.brep").exists(),
-        "rejected chamfer must not write a BREP"
+        root.join("brep/chain-chamfer-1.brep").is_file(),
+        "successful chamfer publishes its own BREP"
     );
 
     let _ = fs::remove_dir_all(root);
@@ -3518,7 +3610,7 @@ fn shell_commits_brep_into_a_new_revision() {
 }
 
 #[test]
-fn shell_replays_from_canonical_intent_after_derived_results_are_deleted() {
+fn shell_replay_recovers_authenticated_bytes_from_the_previous_generation() {
     let Some(worker) = locate_worker() else {
         return;
     };
@@ -3535,6 +3627,13 @@ fn shell_replays_from_canonical_intent_after_derived_results_are_deleted() {
     let committed = host
         .shell(&root, shell_request, &worker)
         .expect("shell commits");
+    // Thick-solid serialization is not byte-stable across OCCT runs. Keep an
+    // authenticated prior generation so replay can restore the original bytes
+    // without accepting a differently serialized result under the old digest.
+    let checkpoint = host
+        .save(&root, "shell-checkpoint", "checkpoint")
+        .expect("checkpoint retains authenticated shell bytes");
+    assert_ne!(checkpoint.revision_hash, committed.snapshot.revision_hash);
     let expected =
         fs::read(committed_brep_path(&root, "shell-replay-1")).expect("committed shell reads");
     fs::remove_file(&base_path).expect("base derived result deletes");
@@ -3544,7 +3643,7 @@ fn shell_replays_from_canonical_intent_after_derived_results_are_deleted() {
     let replayed = Host::new()
         .load_with_geometry_replay(&root)
         .expect("canonical shell replay succeeds");
-    assert_eq!(replayed.revision_hash, committed.snapshot.revision_hash);
+    assert_eq!(replayed.revision_hash, checkpoint.revision_hash);
     assert_eq!(
         fs::read(committed_brep_path(&root, "shell-replay-1")).expect("replayed shell reads"),
         expected

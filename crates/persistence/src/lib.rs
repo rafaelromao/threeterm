@@ -812,13 +812,15 @@ fn canonical_geometry_feature_exists(
     log: &TransactionLog,
     feature_id: &str,
 ) -> bool {
-    graph
-        .features()
-        .any(|feature| feature.id.as_str() == feature_id && feature.kind.starts_with("brep:"))
-        && log
-            .entries()
-            .iter()
-            .any(|entry| entry.feature_id == feature_id && entry.intent.is_some())
+    // Geometry is identified by authenticated canonical intent, not a kind
+    // prefix: bracket roots and holes have their own registered feature kinds.
+    graph.contains_feature(feature_id)
+        && log.entries().iter().any(|entry| {
+            entry.feature_id == feature_id
+                && entry.intent.is_some()
+                && entry.brep_sha256.is_some()
+                && entry.brep_byte_count.is_some()
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

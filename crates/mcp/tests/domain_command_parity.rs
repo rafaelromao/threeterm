@@ -411,6 +411,7 @@ fn lost_edge_reference(revision: &str) -> Value {
     let mut reference = edge_reference(revision);
     reference["semantic_id"] = json!("missing-edge");
     reference["provenance"]["source_edge_id"] = json!("missing-edge");
+    reference["evidence"]["midpoint"] = json!([100.0, 100.0, 100.0]);
     reference
 }
 
@@ -538,6 +539,8 @@ fn setup_attached_sketch_root(root: &std::path::Path) -> Option<Value> {
         "x_axis": candidate.evidence.x_axis,
         "y_axis": candidate.evidence.y_axis
     });
+    // Fixed points fully constrain segments, but would leave a circle's
+    // independent radius unconstrained in the pinned solver.
     Some(json!({
         "bundle_path": root.to_string_lossy(),
         "request_id": "attached-sketch-parity-request",
@@ -548,7 +551,7 @@ fn setup_attached_sketch_root(root: &std::path::Path) -> Option<Value> {
             {"kind": "point", "id": "p1", "x": 0.0, "y": 1.0},
             {"kind": "point", "id": "p2", "x": 2.0, "y": 1.0},
             {"kind": "line_segment", "id": "line", "start": "p1", "end": "p2"},
-            {"kind": "circle", "id": "circle", "center": "p0", "radius": 1.0}
+            {"kind": "line_segment", "id": "link", "start": "p0", "end": "p2"}
         ],
         "constraints": [
             {"id": "fixed-p0", "kind": "fixed", "entities": ["p0"]},
@@ -1141,7 +1144,7 @@ fn cli_mcp_and_tui_commit_the_same_attached_sketch_result() {
         assert_eq!(result["reattachment_outcome"], "resolved");
         assert_eq!(
             result["entity_ids"],
-            json!(["p0", "p1", "p2", "line", "circle"])
+            json!(["p0", "p1", "p2", "line", "link"])
         );
         assert_eq!(
             result["solved_coordinates"].as_array().map(Vec::len),
@@ -1176,11 +1179,13 @@ fn cli_mcp_and_tui_commit_the_same_attached_sketch_result() {
                 .iter()
                 .any(|feature| feature.kind.starts_with("sketch-segment3:"))
         );
-        assert!(
+        assert_eq!(
             scene
                 .features
                 .iter()
-                .any(|feature| feature.kind.starts_with("sketch-circle3:"))
+                .filter(|feature| feature.kind.starts_with("sketch-segment3:"))
+                .count(),
+            2
         );
     }
 
@@ -1301,16 +1306,8 @@ fn cli_mcp_and_tui_preserve_historical_failure_recovery_context() {
     let tui_root = root("historical-failure-tui");
     for path in [&cli_root, &mcp_root, &tui_root] {
         threeterm_host::Host::new()
-            .save_bracket(path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+            .execute_bracket_command(path, "l-bracket", 60.0, 30.0, 40.0, 3.0)
             .expect("history fixture creates");
-        fs::copy(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs/research/rehearsal-evidence/l-bracket/run-2/project/brep/l-bracket.brep"
-            ),
-            path.join("brep/l-bracket.brep"),
-        )
-        .expect("history fixture BREP copies");
     }
 
     let cli = dispatch_registered_command(
@@ -1402,13 +1399,13 @@ fn cli_mcp_and_tui_preserve_historical_failure_recovery_context() {
     let cli_export = dispatch_registered_command(
         &threeterm_host::Host::new(),
         EXPORT_COMMAND_ID,
-        export_request_for_feature(&cli_root, "l-bracket-base", false, false),
+        export_request_for_feature(&cli_root, "l-bracket", false, false),
     )
     .expect("CLI exports restored current geometry");
     let tui_export = threeterm_tui::execute_domain_command(
         &threeterm_host::Host::new(),
         EXPORT_COMMAND_ID,
-        export_request_for_feature(&tui_root, "l-bracket-base", false, false),
+        export_request_for_feature(&tui_root, "l-bracket", false, false),
     )
     .expect("TUI exports restored current geometry");
     let mcp_export_response = McpServer::new().handle_request(&JsonRpcRequest {
@@ -1417,7 +1414,7 @@ fn cli_mcp_and_tui_preserve_historical_failure_recovery_context() {
         method: "tools/call".to_string(),
         params: json!({
             "name": "threeterm.command.export/1",
-            "arguments": export_request_for_feature(&mcp_root, "l-bracket-base", false, false)
+            "arguments": export_request_for_feature(&mcp_root, "l-bracket", false, false)
         }),
     });
     let mcp_export = mcp_export_response
@@ -2501,7 +2498,7 @@ fn cli_mcp_and_tui_commit_equivalent_boolean_cut_solids() {
 
     for result in [&cli, &tui, &mcp] {
         assert_eq!(result["status"], "ok");
-        assert_eq!(result["operation"], "boolean_cut");
+        assert_eq!(result["operation"], "boolean-cut");
         assert_eq!(result["feature_id"], "bool-cut");
         assert_eq!(
             result["schema_version"],
@@ -2553,7 +2550,7 @@ fn cli_mcp_and_tui_commit_equivalent_boolean_common_solids() {
 
     for result in [&cli, &tui, &mcp] {
         assert_eq!(result["status"], "ok");
-        assert_eq!(result["operation"], "boolean_common");
+        assert_eq!(result["operation"], "boolean-common");
         assert_eq!(result["feature_id"], "bool-common");
         assert_eq!(
             result["schema_version"],
@@ -2595,7 +2592,12 @@ fn setup_hole_base(path: &std::path::Path, worker: &OcctWorker) {
         .extrude(
             path,
             ExtrudeRequest::new(
-                format!("hole-seed-{}", path.to_string_lossy()),
+                format!(
+                    "hole-seed-{}",
+                    path.file_name()
+                        .expect("fixture has a basename")
+                        .to_string_lossy()
+                ),
                 vec![(0.0, 0.0), (10.0, 0.0), (10.0, 5.0), (0.0, 5.0)],
                 3.0,
             )

@@ -65,7 +65,7 @@ bash .github/scripts/test-suite.sh fast
 # Run only the opt-in slow tests
 bash .github/scripts/test-suite.sh slow
 
-# Run the complete native E2E suite, including ignored tests
+# Run the native E2E suite, including ignored native tests
 bash .github/scripts/e2e.sh
 
 # Run the commit-bound production conformance catalog. The command runs every
@@ -79,6 +79,29 @@ bash .github/scripts/acceptance.sh
 # workers or a graphical runner.
 bash tests/three-journey-gate.sh
 ```
+
+## Resource-bounded local native checks
+
+The CI, native E2E, and three-journey scripts default to one Cargo build job.
+For native checks on a desktop, run one test command at a time and place its
+temporary projects on disk rather than in a memory-backed `/tmp`. On a systemd
+Linux desktop, a transient user scope also bounds the whole test process tree:
+
+```sh
+mkdir -p target/release-e2e-tmp
+systemd-run --user --scope --quiet \
+  -p CPUQuota=100% -p MemoryHigh=1G -p MemoryMax=2G \
+  -p MemorySwapMax=0 -p TasksMax=64 -p IOWeight=10 \
+  nice -n 15 env CARGO_BUILD_JOBS=1 TMPDIR="$PWD/target/release-e2e-tmp" \
+  cargo test -p threeterm-host --test domain_command_executor \
+  --jobs 1 -- --test-threads=1
+```
+
+Configure the pinned native worker prefixes before running native tests, as for
+the ordinary local verification commands. The scope limits CPU usage to one
+core, caps memory at 2 GiB, and permits no additional swap. Reaching the memory
+limit fails the test process inside the scope. These limits are transient and
+do not change desktop settings.
 
 ## Official Interactive Environment Verification
 
@@ -160,8 +183,8 @@ transaction IDs are not equivalence keys.
 
 ### Three-journey CI gate
 
-Pull-request CI runs `.github/workflows/three-journey.yml`. The API and MCP
-journeys run in the pinned rootless Arch container, while the TUI journey runs
+Release PR verification dispatches `.github/workflows/three-journey.yml`. The
+API and MCP journeys run in the pinned rootless Arch container, while the TUI journey runs
 only on a self-hosted runner labelled `threeterm-graphical` with
 `THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT` configured. The jobs share the run ID,
 recipe binding, native-worker bundle, and retained evidence before the aggregate
@@ -229,11 +252,90 @@ publishing a merged release PR, `.github/scripts/release.sh verify` checks the
 signed release-namespace gate; an unsigned or stale gate stops tag and GitHub
 Release creation.
 
+### Release E2E orchestration
+
+After creating or updating the pending release PR, the Release Please workflow
+dispatches `native-e2e` and `three-journey-gate` against that PR's head commit.
+The `Release E2E gate` commit status passes only when both workflows pass.
+
+The native workflow sets `THREETERM_ACCEPTANCE_SCOPE=native`. Its acceptance
+catalog records `scope: "native"` and `deferred_gates: ["coverage.all-surfaces"]`,
+and requires complete evidence for all twenty native gates, including
+`release.namespace`. Graphical coverage is required by the separate
+three-journey aggregate, which also compares the three retained STL artifacts.
+The native test selectors exclude that cross-surface aggregate because its TUI
+evidence is produced by the qualified graphical runner. Running `acceptance.sh`
+locally defaults to `scope: "full"` and executes all twenty-one gates.
+
+To complete a release run:
+
+1. Register an online Linux x64 self-hosted Actions runner with the
+   `threeterm-graphical` label under **Settings → Actions → Runners**. Install
+   the [Official Interactive Environment prerequisites](#official-interactive-environment-verification)
+   and set `THREETERM_GRAPHICAL_TOOLCHAIN_CONTRACT` in the runner's environment
+   to the qualified version-contract file. Keep the runner available for the
+   TUI job; a queued job with no matching runner cannot publish passing evidence.
+2. Complete and commit the current owner-signed
+   [namespace release gate](release/trademark-and-namespace-gate.md).
+   `bash .github/scripts/release.sh verify` must pass before the release
+   acceptance catalog can pass.
+3. Merge the E2E fixes into `main`, then let Release Please update the release
+   PR and dispatch checks for its new head commit. Re-running an old workflow
+   run uses its original checkout and does not pick up these fixes.
+
+### Run Release Please PR checks without workflow approval
+
+GitHub puts `pull_request` workflows triggered by a PR created or updated with
+the built-in `GITHUB_TOKEN` into an **approval-required** state. This applies to
+the fast CI and semantic-title checks. Explicit `workflow_dispatch` events,
+including this repository's release E2E dispatches, run automatically with
+`GITHUB_TOKEN`.
+
+Use a fine-grained personal access token for the Release Please action to make
+its PR checks run automatically:
+
+1. Create a token scoped to `rafaelromao/threeterm`, with **Contents: read and
+   write** and **Pull requests: read and write**. Grant **Workflows: read and
+   write** if Release Please needs to update workflow files on its branch.
+2. Store it as the repository Actions secret `RELEASE_PLEASE_TOKEN` under
+   **Settings → Secrets and variables → Actions**.
+3. The Release Please step in `.github/workflows/release-please.yml` already
+   uses this secret when present and falls back to the built-in token otherwise:
+
+   ```yaml
+   - name: Create or update the release pull request
+     uses: googleapis/release-please-action@v4
+     with:
+       token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+       config-file: release-please-config.json
+       manifest-file: .release-please-manifest.json
+   ```
+
+4. Keep **Allow GitHub Actions to create and approve pull requests** enabled
+   under **Settings → Actions → General → Workflow permissions**. The workflow
+   declares its own write permissions, so the default token permissions can
+   remain read-only.
+
+An installed GitHub App can also provide the Release Please token: generate its
+short-lived installation token with `actions/create-github-app-token` and pass
+that step's `outputs.token` to Release Please. Both App and PAT credentials
+allow automatic PR workflows without the built-in-token approval prompt.
+
+Using an App/PAT also enables normal `push` events. The slow suites use only
+`workflow_dispatch`, so adding the secret does not create duplicate E2E runs.
+The dispatcher waits for those runs and publishes the combined release status.
+Its `GH_TOKEN` continues using `GITHUB_TOKEN` with `actions: write` and
+`statuses: write`.
+
+Changing fork-contributor approval settings does not remove the approval
+requirement for PRs created with `GITHUB_TOKEN`.
+See GitHub's [workflow-triggering documentation](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow#triggering-a-workflow-from-a-workflow).
+
 ## Test suites
 
 `#[ignore = "slow: ..."]` identifies a long-running test. Pull-request CI
 runs the fast suite with native worker construction disabled. The manually
-triggered native E2E workflow runs the complete suite, including ignored tests,
+triggered native E2E workflow runs the native suite, including ignored tests,
 against the immutable OCCT and libslvs workers. The slow suite remains a
 smaller local opt-in that runs only ignored tests.
 

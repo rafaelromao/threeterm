@@ -30,9 +30,9 @@ use threeterm_occt_worker::{
     EdgeCandidateEvidence, ExportRequest, ExtrudeMode, ExtrudeRequest, ExtrudeResult,
     FilletRequest, FilletResult, HoleRequest, HoleResult, LinearPatternRequest,
     LinearPatternResult, LoftRequest, LoftResult, MirrorRequest, MirrorResult, OcctDiagnostic,
-    OcctWorker, Operation, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult,
-    SelectedEdgeContext, ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest,
-    TranslateResult, ValidateRequest, WorkerError, new_request_id,
+    OcctWorker, PlanarFaceEvidenceRequest, RevolveRequest, RevolveResult, SelectedEdgeContext,
+    ShellRequest, ShellResult, SplitRequest, SplitResult, TranslateRequest, TranslateResult,
+    ValidateRequest, WorkerError, new_request_id,
 };
 use threeterm_persistence::{
     BOOLEAN_INTENT_SCHEMA_VERSION, BOOLEAN_PATTERN_INTENT_SCHEMA_VERSION,
@@ -3241,84 +3241,80 @@ impl Host {
         thickness: f64,
     ) -> Result<BracketCommitView, HostError> {
         let bundle = bundle.as_ref();
-        let source_snapshot = if bundle.exists() {
-            Some(self.load(bundle)?)
-        } else {
-            None
-        };
-        let response = self
-            .execute_domain_command(
-                BRACKET_COMMAND_ID,
-                serde_json::json!({
-                    "bundle_path": bundle.to_string_lossy(),
-                    "bracket_id": bracket_id,
-                    "length": length,
-                    "width": width,
-                    "height": height,
-                    "thickness": thickness,
-                }),
-            )
-            .map_err(host_error_from_execution)?;
-        let snapshot = self.load(bundle)?;
-        let source_snapshot = match source_snapshot {
-            Some(source_snapshot) => source_snapshot,
-            None => SnapshotView {
-                generation_id: snapshot.generation_id.clone(),
-                feature_graph_hash: response["source_snapshot"]["feature_graph_hash"]
-                    .as_str()
-                    .ok_or_else(|| HostError::Validation {
-                        detail: "bracket response omitted source feature graph hash".to_string(),
-                    })?
-                    .to_string(),
-                revision_hash: response["source_snapshot"]["revision_hash"]
-                    .as_str()
-                    .ok_or_else(|| HostError::Validation {
-                        detail: "bracket response omitted source revision hash".to_string(),
-                    })?
-                    .to_string(),
-                recovered_from_previous: false,
+        let mut committed = None;
+        self.execute_domain_command_with_handler(
+            BRACKET_COMMAND_ID,
+            serde_json::json!({
+                "bundle_path": bundle.to_string_lossy(),
+                "bracket_id": bracket_id,
+                "length": length,
+                "width": width,
+                "height": height,
+                "thickness": thickness,
+            }),
+            |request| {
+                let view = self.execute_registered_bracket_command(&request)?;
+                let response = bracket_response_value(
+                    &view,
+                    find(BRACKET_COMMAND_ID)
+                        .expect("bracket is registered")
+                        .response_schema_version,
+                );
+                committed = Some(view);
+                Ok::<_, HostError>(response)
             },
-        };
-        let request_id = response
-            .get("request_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| HostError::Validation {
-                detail: "bracket response omitted request_id".to_string(),
-            })?;
-        let artifact = self
-            .layer1_results
-            .borrow()
-            .values()
-            .find(|artifact| artifact.request_id == request_id)
-            .cloned()
-            .ok_or_else(|| HostError::Validation {
-                detail: "bracket response has no promoted artifact".to_string(),
-            })?;
-        let result = BracketResult {
-            schema_version: threeterm_occt_worker::SCHEMA_VERSION.to_string(),
-            request_id: request_id.to_string(),
-            operation: Operation::Bracket,
-            status: response["status"].as_str().unwrap_or_default().to_string(),
-            brep_path: PathBuf::from(response["brep_path"].as_str().unwrap_or_default()),
-            brep_sha256: response["brep_sha256"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-            brep_bytes: response["brep_bytes"]
-                .as_u64()
-                .and_then(|bytes| usize::try_from(bytes).ok())
-                .unwrap_or_default(),
-            feature_id: response["feature_id"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string(),
-        };
-        Ok(BracketCommitView {
-            source_snapshot,
-            snapshot,
-            result,
-            artifact,
+        )
+        .map_err(host_error_from_execution)?;
+        // Promotion discards the staging cache. Return the handler's typed
+        // commit view rather than attempting to recover it from that cache.
+        committed.ok_or_else(|| HostError::Validation {
+            detail: "bracket handler omitted its committed view".to_string(),
         })
+    }
+
+    fn execute_registered_bracket_command(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<BracketCommitView, HostError> {
+        let string_field = |name: &str| {
+            request[name].as_str().ok_or_else(|| HostError::Validation {
+                detail: format!("missing string field {name:?}"),
+            })
+        };
+        let number_field = |name: &str| {
+            request[name].as_f64().ok_or_else(|| HostError::Validation {
+                detail: format!("bracket {name} must be a number"),
+            })
+        };
+        let bundle_path = string_field("bundle_path")?;
+        if let Some(expected_revision) = request["expected_revision"].as_str() {
+            let current = self.load(bundle_path)?;
+            if current.revision_hash != expected_revision {
+                return Err(HostError::Validation {
+                    detail: format!(
+                        "bracket source revision {expected_revision:?} does not match current revision {:?}",
+                        current.revision_hash
+                    ),
+                });
+            }
+        }
+        let bracket_id = string_field("bracket_id")?;
+        let length = number_field("length")?;
+        let width = number_field("width")?;
+        let height = number_field("height")?;
+        let thickness = number_field("thickness")?;
+        let typed_request = BracketRequest::new(
+            canonical_bracket_request_id(bracket_id, length, width, height, thickness),
+            length,
+            width,
+            height,
+            thickness,
+        )
+        .with_feature_id(bracket_id);
+        let worker = OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
+            detail: error.to_string(),
+        })?;
+        self.create_bracket(bundle_path, typed_request, &worker)
     }
 
     /// Apply the registered command contract to an adapter-owned orchestration
@@ -3651,56 +3647,7 @@ impl Host {
                 }));
             }
             if command == BRACKET_COMMAND_ID {
-                let bundle_path = string_field("bundle_path")?;
-                let expected_revision = request
-                    .get("expected_revision")
-                    .and_then(serde_json::Value::as_str);
-                if let Some(expected_revision) = expected_revision {
-                    let current = self.load(bundle_path)?;
-                    if current.revision_hash != expected_revision {
-                        return Err(HostError::Validation {
-                            detail: format!(
-                                "bracket source revision {expected_revision:?} does not match current revision {:?}",
-                                current.revision_hash
-                            ),
-                        });
-                    }
-                }
-                let bracket_id = string_field("bracket_id")?;
-                let length = request["length"]
-                    .as_f64()
-                    .ok_or_else(|| HostError::Validation {
-                        detail: "bracket length must be a number".to_string(),
-                    })?;
-                let width = request["width"]
-                    .as_f64()
-                    .ok_or_else(|| HostError::Validation {
-                        detail: "bracket width must be a number".to_string(),
-                    })?;
-                let height = request["height"]
-                    .as_f64()
-                    .ok_or_else(|| HostError::Validation {
-                        detail: "bracket height must be a number".to_string(),
-                    })?;
-                let thickness =
-                    request["thickness"]
-                        .as_f64()
-                        .ok_or_else(|| HostError::Validation {
-                            detail: "bracket thickness must be a number".to_string(),
-                        })?;
-                let request = BracketRequest::new(
-                    canonical_bracket_request_id(bracket_id, length, width, height, thickness),
-                    length,
-                    width,
-                    height,
-                    thickness,
-                )
-                .with_feature_id(bracket_id);
-                let worker =
-                    OcctWorker::locate().map_err(|error| HostError::WorkerUnavailable {
-                        detail: error.to_string(),
-                    })?;
-                let view = self.create_bracket(bundle_path, request, &worker)?;
+                let view = self.execute_registered_bracket_command(&request)?;
                 return Ok(bracket_response_value(
                     &view,
                     find(command)
@@ -3896,7 +3843,7 @@ impl Host {
                         "revision_hash": view.snapshot.revision_hash,
                         "authoritative": true,
                         "artifact_kind": "brep",
-                        "artifact_name": format!("{}.brep", view.result.feature_id),
+                        "artifact_name": view.artifact.artifact_name,
                         "brep_path": view.result.brep_path,
                         "brep_sha256": view.result.brep_sha256,
                         "brep_bytes": view.result.brep_bytes,
@@ -11384,6 +11331,7 @@ impl Host {
         self.current.replace(Some(updated));
         let mut artifact = derived.artifact;
         artifact.path = root.join(BREP_SUBDIR).join(format!("{feature_id}.brep"));
+        artifact.artifact_name = format!("{feature_id}.brep");
         let mut value =
             serde_json::to_value(derived.result).map_err(|error| HostError::Validation {
                 detail: format!("typed OCCT result serialization failed: {error}"),
@@ -12643,6 +12591,7 @@ impl Host {
         result.brep_bytes = bytes.len();
         result.brep_sha256 = sha256_hex(&bytes);
         artifact.path = result.brep_path.clone();
+        artifact.artifact_name = format!("{feature_id}.brep");
         Ok(ExtrudeCommitView {
             source_snapshot,
             snapshot,

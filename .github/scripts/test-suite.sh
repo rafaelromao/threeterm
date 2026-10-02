@@ -2,6 +2,8 @@
 # Selects the ThreeTerm test tier. Native E2E is serialized because each test
 # launches disposable native workers; fast CI has no native worker and can use
 # Cargo's default parallelism.
+# Cross-surface aggregates run in three-journey-gate.sh after the qualified
+# graphical producer has retained its evidence.
 
 set -euo pipefail
 
@@ -38,6 +40,9 @@ case "${1:-}" in
                 --skip production_tui_tapered_lofted_reinforcements \
                 --skip production_tui_bracket_foundation \
                 --skip production_tui_all_tools_stl_journey \
+                --skip production_tui_save_reopen_validate_export \
+                --skip production_tui_reinforcement \
+                --skip e2e_stl_three_surface_geometric_equivalence \
                 --skip all_surfaces_tool_coverage_matrix --test-threads=1
         ;;
     e2e)
@@ -50,6 +55,9 @@ case "${1:-}" in
                 --skip production_tui_tapered_lofted_reinforcements \
                 --skip production_tui_bracket_foundation \
                 --skip production_tui_all_tools_stl_journey \
+                --skip production_tui_save_reopen_validate_export \
+                --skip production_tui_reinforcement \
+                --skip e2e_stl_three_surface_geometric_equivalence \
                 --skip all_surfaces_tool_coverage_matrix --test-threads=1
         ;;
     graphical)

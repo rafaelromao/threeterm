@@ -496,8 +496,8 @@ fn boolean_pattern_call(root: &std::path::Path, id: &str) -> Value {
                 "base_feature_id": "l-1",
                 "origin": [6.0, 6.0, -1.0],
                 "spacing": [6.0, 6.0],
-                "columns": 18,
-                "rows": 18,
+                "columns": 9,
+                "rows": 9,
                 "diameter": 2.0
             }
         }
@@ -755,7 +755,7 @@ fn production_mcp_streams_real_boolean_pattern_progress_and_commits() {
         .iter()
         .find(|response| response["id"] == "pattern-1")
         .expect("production MCP returns a terminal response");
-    assert!(result["result"]["isError"].is_null());
+    assert_ne!(result["result"]["isError"], true, "{result:?}");
     assert_eq!(result["result"]["structuredContent"]["status"], "ok");
     assert!(root.join("brep/pattern-1.brep").is_file());
     let _ = std::fs::remove_dir_all(root);

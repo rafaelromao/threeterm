@@ -65,8 +65,8 @@ fn export_validated_current_solid_to_stl_end_to_end() {
     let output = parent.join("export");
     let invalid_output = parent.join("invalid-export");
     Host::new()
-        .save_bracket(&bundle, "l-bracket", 60.0, 30.0, 40.0, 3.0)
-        .expect("real L-bracket saves");
+        .execute_bracket_command(&bundle, "l-bracket", 60.0, 30.0, 40.0, 3.0)
+        .expect("real L-bracket geometry commits");
 
     let reopened = Host::new();
     let loaded = command_response(
@@ -127,7 +127,17 @@ fn export_validated_current_solid_to_stl_end_to_end() {
     assert!(facet_count > 0, "published STL contains facets");
     assert_eq!(stl_text.matches("vertex ").count(), facet_count * 3);
     assert!(stl_text.starts_with("solid "));
-    assert!(stl_text.trim_end().ends_with("endsolid l-bracket"));
+    let solid_name = stl_text
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("solid "))
+        .expect("ASCII STL has a solid header");
+    let end_solid = format!("endsolid {solid_name}");
+    assert_eq!(
+        stl_text.lines().last().map(str::trim),
+        Some(end_solid.trim()),
+        "ASCII STL closes the same solid, including an unnamed OCCT solid"
+    );
     let artifact = exported["derived_artifacts"]
         .as_array()
         .expect("derived artifacts are present")
@@ -161,15 +171,20 @@ fn export_validated_current_solid_to_stl_end_to_end() {
     fs::write(&brep_path, corrupted).expect("current BREP corruption writes");
     let error = reopened
         .execute_domain_command(EXPORT_COMMAND_ID, export_request(&bundle, &invalid_output))
-        .expect_err("invalid current geometry refuses export");
+        .expect_err("tampered current geometry refuses export");
     let diagnostic = domain_execution_diagnostic(&error);
-    assert_eq!(diagnostic.code, DiagnosticCode::BrepInvalid);
+    // A committed solid is authenticated against its canonical provenance
+    // before geometric validation or export can run.
+    assert_eq!(diagnostic.code, DiagnosticCode::PersistenceFailure);
     assert!(diagnostic.arg.contains("l-bracket"));
+    assert!(diagnostic.arg.contains("failed integrity verification"));
     assert!(!invalid_output.exists(), "refusal creates no output");
 
     assert!(matches!(
         error,
-        ExecutionError::Handler(HostError::BrepInvalid { .. })
+        ExecutionError::Handler(HostError::Persistence(
+            threeterm_persistence::BundleError::Invalid(_)
+        ))
     ));
     let _ = fs::remove_dir_all(parent);
 }

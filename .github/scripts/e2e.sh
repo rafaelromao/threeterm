@@ -3,6 +3,7 @@
 # workflows; immutable OCCT and libslvs source builds are intentionally isolated.
 
 set -euo pipefail
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 
 cd "$(dirname "$0")/../.."
 

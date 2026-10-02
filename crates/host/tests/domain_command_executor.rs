@@ -938,7 +938,20 @@ fn public_dispatcher_routes_sixteen_baseline_commands_and_preserves_lifecycle_co
                         .and_then(Value::as_object)
                         .expect("geometry response includes derived-result provenance");
                     assert_eq!(derived["artifact_kind"], "brep");
-                    assert_eq!(derived["artifact_name"], response["artifact_name"]);
+                    if let Some(artifact_name) = response.get("artifact_name") {
+                        assert_eq!(&derived["artifact_name"], artifact_name);
+                    }
+                    assert_eq!(
+                        derived["artifact_name"].as_str(),
+                        std::path::Path::new(
+                            response["brep_path"]
+                                .as_str()
+                                .expect("BREP path is present")
+                        )
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                        "the response names the committed artifact, not a guessed filename"
+                    );
                     assert_eq!(derived["byte_count"], response["brep_bytes"]);
                     assert_eq!(derived["sha256"], response["brep_sha256"]);
                 }
@@ -1227,6 +1240,13 @@ fn public_dispatcher_preserves_the_canonical_bracket_request_identity() {
         )
         .expect("bracket command executes");
     assert_eq!(view.result.request_id, expected_request_id);
+    assert_eq!(view.artifact.request_id, expected_request_id);
+    assert_eq!(view.artifact.path, view.result.brep_path);
+    assert_eq!(view.artifact.sha256, view.result.brep_sha256);
+    assert_eq!(
+        sha256_hex(&fs::read(&view.artifact.path).expect("promoted bracket BREP reads")),
+        view.artifact.sha256
+    );
     let _ = fs::remove_dir_all(root);
 }
 

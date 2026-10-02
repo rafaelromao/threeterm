@@ -4,6 +4,8 @@
 # Every gate runs in its own fail-fast subprocess. The parent keeps running so
 # a failed gate never hides later evidence, then publishes the failure catalog
 # before returning a non-zero status.
+# THREETERM_ACCEPTANCE_SCOPE=native defers graphical coverage to the required
+# three-journey workflow; the default full scope requires every gate locally.
 
 set -uo pipefail
 
@@ -11,6 +13,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || {
     printf '%s\n' 'acceptance catalog: unable to resolve repository root' >&2
     exit 1
 }
+ACCEPTANCE_SCOPE="${THREETERM_ACCEPTANCE_SCOPE:-full}"
+case "${ACCEPTANCE_SCOPE}" in
+    full) DEFERRED_GATES='[]' ;;
+    native) DEFERRED_GATES='["coverage.all-surfaces"]' ;;
+    *) printf 'unknown acceptance scope: %s\n' "${ACCEPTANCE_SCOPE}" >&2; exit 2 ;;
+esac
+readonly ACCEPTANCE_SCOPE DEFERRED_GATES
 cd "${ROOT}" || {
     printf '%s\n' 'acceptance catalog: unable to enter repository root' >&2
     exit 1
@@ -88,6 +97,10 @@ run_gate() {
     local id="$1"
     local display="$2"
     shift 2
+    if [[ "${ACCEPTANCE_SCOPE}" == native && "${id}" == coverage.all-surfaces ]]; then
+        printf 'DEFER %s (required by the separate three-journey gate)\n' "${id}"
+        return 0
+    fi
     local log="${LOG_ROOT}/${id//[^A-Za-z0-9_.-]/_}.log"
     local timeout_marker="${log}.timeout"
     local status
@@ -726,7 +739,7 @@ if [[ ! -f "${JOURNEY_EVIDENCE}" ]] || ! jq -e '
      ' "${JOURNEY_EVIDENCE}" >/dev/null 2>&1; then
      EVIDENCE_VALID=false
 fi
-if [[ ! -f "${MATRIX_EVIDENCE}" ]] || ! jq -e '
+if [[ "${ACCEPTANCE_SCOPE}" == full ]] && ! jq -e '
      .schema_version == "threeterm.coverage.matrix/1" and
      (.result == "passed" or .result == "failed") and
      (.required_commands | type == "array" and length == 18) and
@@ -772,8 +785,12 @@ if [[ "${WORKERS}" == '{}' ]] || ! jq -e '
     ' <<<"${WORKERS}" >/dev/null 2>&1; then
     EVIDENCE_VALID=false
 fi
-for evidence_path in "${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${JOURNEY_EVIDENCE}" "${MATRIX_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json" \
-    "${SCHEMA_RESPONSE}" "${SCHEMA_PROJECT}/manifest.json"; do
+REQUIRED_EVIDENCE=("${NATIVE_MANIFEST}" "${OCCT_SMOKE_EVIDENCE}" "${JOURNEY_EVIDENCE}" "${LIBSLVS_ARTIFACT}/manifest.json"
+    "${SCHEMA_RESPONSE}" "${SCHEMA_PROJECT}/manifest.json")
+if [[ "${ACCEPTANCE_SCOPE}" == full ]]; then
+    REQUIRED_EVIDENCE+=("${MATRIX_EVIDENCE}")
+fi
+for evidence_path in "${REQUIRED_EVIDENCE[@]}"; do
     evidence_relative="$(relative_artifact_path "${evidence_path}" || true)"
     if [[ -z "${evidence_relative}" ]] || ! jq -e --arg path "${evidence_relative}" '
         any(.[]; .path == $path and (.bytes | type == "number" and . >= 0)
@@ -817,6 +834,8 @@ fi
 
 jq -S -n \
     --arg schema_version threeterm.acceptance.catalog/1 \
+    --arg scope "${ACCEPTANCE_SCOPE}" \
+    --argjson deferred_gates "${DEFERRED_GATES}" \
     --arg repository https://github.com/rafaelromao/threeterm \
     --arg source_commit "${SOURCE_COMMIT}" \
     --arg source_commit_after "${SOURCE_COMMIT_AFTER}" \
@@ -831,6 +850,7 @@ jq -S -n \
     --argjson workers "${WORKERS}" \
     --argjson artifacts "${ARTIFACTS}" \
     '{schema_version: $schema_version,
+      scope: $scope, deferred_gates: $deferred_gates,
       source: {repository: $repository, commit: $source_commit,
                commit_after: $source_commit_after, clean: $source_clean,
                clean_after: $source_clean_after,
@@ -847,6 +867,8 @@ jq -S -n \
 
 if jq -e \
     '.schema_version == "threeterm.acceptance.catalog/1" and
+     ((.scope == "full" and .deferred_gates == []) or
+      (.scope == "native" and .deferred_gates == ["coverage.all-surfaces"])) and
      (.source.commit | type == "string") and
      (.evidence.complete | type == "boolean") and
      (.schemas | type == "object") and

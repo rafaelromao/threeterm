@@ -1762,6 +1762,12 @@ fn historical_named_revision_restore() {
     host.create_named_revision(&root, "before-failure")
         .expect("Named Revision creates before the invalid edit");
     let named_before = named_revision_semantics(&root, "before-failure");
+    let expected_history_revision = host
+        .history(&root)
+        .expect("named source history reads")
+        .active_snapshot()
+        .revision_id
+        .clone();
     let log_len_before_edit = Bundle::at(&root)
         .open()
         .expect("bundle opens before the invalid edit")
@@ -1781,8 +1787,8 @@ fn historical_named_revision_restore() {
         fs::read(root.join("transactions.log")).expect("log reads after restore");
     assert_eq!(
         loaded.log.len(),
-        log_len_before_edit + 2,
-        "historical edit and restore append transactions without rewriting history"
+        log_len_before_edit + 3,
+        "historical edit, preserved future, and restore append transactions without rewriting history"
     );
     assert!(
         log_after_restore.starts_with(&log_before_edit),
@@ -1808,7 +1814,7 @@ fn historical_named_revision_restore() {
     assert_eq!(current_brep(&root), before_geometry);
     assert_eq!(
         restored.history.active_snapshot().revision_id,
-        "history-revision-2"
+        expected_history_revision
     );
 
     let output = temp_root("named-revision-restore-export");

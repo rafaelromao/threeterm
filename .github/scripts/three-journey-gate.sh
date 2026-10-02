@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT}" || exit 1

@@ -1294,6 +1294,9 @@ fn boolean_pattern_cuts_324_holes_with_real_occt() {
     else {
         return;
     };
+    // This deliberately slow maximum-size workload needs a bounded budget
+    // larger than the ordinary request deadline, especially on CI runners.
+    let worker = worker.with_grace(std::time::Duration::from_secs(120));
     let temp = std::env::temp_dir().join(format!(
         "threeterm-occt-boolean-pattern-{}",
         std::process::id()

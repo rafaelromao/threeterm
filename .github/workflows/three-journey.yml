@@ -1,8 +1,6 @@
 name: three-journey-gate
 
 on:
-  push:
-    branches: ['release-please--branches--**']
   workflow_dispatch:
 
 permissions:
@@ -16,10 +14,6 @@ env:
 jobs:
   headless:
     name: API and MCP journeys
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'push' &&
-           startsWith(github.ref_name, 'release-please--branches--')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -99,11 +93,7 @@ jobs:
   tui:
     name: Qualified graphical TUI journey
     needs: headless
-    if: >-
-      ${{ always() &&
-          (github.event_name == 'workflow_dispatch' ||
-           (github.event_name == 'push' &&
-            startsWith(github.ref_name, 'release-please--branches--'))) }}
+    if: ${{ always() }}
     runs-on: [self-hosted, linux, x64, threeterm-graphical]
     timeout-minutes: 60
     steps:
@@ -162,11 +152,7 @@ jobs:
   aggregate:
     name: Aggregate and publish evidence catalog
     needs: [headless]
-    if: >-
-      ${{ always() &&
-          (github.event_name == 'workflow_dispatch' ||
-           (github.event_name == 'push' &&
-            startsWith(github.ref_name, 'release-please--branches--'))) }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 80
     steps:

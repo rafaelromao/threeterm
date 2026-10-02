@@ -1312,7 +1312,7 @@ fn validate_export_for(
                 .starts_with(".threeterm-export-")),
         "export staging is removed"
     );
-    (exports, metadata_by_format)
+    portable_exports(exports, metadata_by_format)
 }
 
 fn portable_identity(identity: &Value) -> Value {

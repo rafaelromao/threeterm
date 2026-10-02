@@ -11,8 +11,6 @@ on:
         options:
           - failed
           - passed
-  push:
-    branches: ['release-please--branches--**']
 
 permissions:
   contents: read
@@ -20,20 +18,13 @@ permissions:
 jobs:
   native-e2e:
     name: Native worker end-to-end checks
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'push' &&
-           startsWith(github.ref_name, 'release-please--branches--')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
       PODMAN_ROOTLESS: "1"
-      THREETERM_EXPECTED_ACCEPTANCE_RESULT: >-
-        ${{ inputs.expected_catalog_result ||
-            (github.event_name == 'push' &&
-             startsWith(github.ref_name, 'release-please--branches--') &&
-             'passed') || 'failed' }}
+      THREETERM_EXPECTED_ACCEPTANCE_RESULT: ${{ inputs.expected_catalog_result || 'failed' }}
       THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS: "3600"
+      THREETERM_ACCEPTANCE_SCOPE: native
       THREETERM_COVERAGE_EVIDENCE_ROOT: target/acceptance-run/journey-coverage
     steps:
       - name: Checkout
@@ -68,6 +59,7 @@ jobs:
               -w /workspace \
               -e "THREETERM_EXPECTED_ACCEPTANCE_RESULT=${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" \
               -e "THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS=${THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS}" \
+              -e "THREETERM_ACCEPTANCE_SCOPE=${THREETERM_ACCEPTANCE_SCOPE}" \
               -e "THREETERM_COVERAGE_EVIDENCE_ROOT=${THREETERM_COVERAGE_EVIDENCE_ROOT}" \
               docker.io/archlinux@sha256:b860afd5823683f7ea389ba5f00d812f4fe55f6f286dea329d2abeefa535e309 \
               bash -lc '
@@ -91,8 +83,8 @@ jobs:
                 bash /workspace/.github/scripts/e2e.sh
                 e2e_status=$?
                 set -e
-                printf '%s\n' "${acceptance_status}" >target/release-acceptance-status
-                printf '%s\n' "${e2e_status}" >target/release-e2e-status
+                printf "%s\n" "${acceptance_status}" >target/release-acceptance-status
+                printf "%s\n" "${e2e_status}" >target/release-e2e-status
               '
           podman_status=$?
           set -e
@@ -117,23 +109,23 @@ jobs:
           jq -e --arg commit "${expected_commit}" \
             --arg expected_result "${THREETERM_EXPECTED_ACCEPTANCE_RESULT}" '
             .schema_version == "threeterm.acceptance.catalog/1" and
+            .scope == "native" and
+            .deferred_gates == ["coverage.all-surfaces"] and
             .source.commit == $commit and
             .source.changed_during_run == false and
-            (.evidence.complete == true or
-              ($expected_result == "failed" and
-               any(.gates[]; .id == "coverage.all-surfaces" and .status == "failed"))) and
+            .evidence.complete == true and
             .result == $expected_result and
             ([.gates[].id] == ["source-integrity", "worker.native", "baseline",
               "workflow.l-bracket", "workflow.box-with-lid", "workflow.reusable-component",
               "workflow.historical-edit", "workflow.object-timeline", "workflow.keyboard-first",
-              "coverage.all-surfaces", "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
+              "workflow.invalid-edit-recovery", "replay.canonical-extrude", "replay.boolean-pattern",
               "replay.reattach-edge", "reliability.failure-drill", "registry.command-schemas",
               "schema.identities", "licensing.libslvs", "release.namespace",
               "documentation.workspace", "performance.claims"]) and
             (if $expected_result == "passed" then
                (.gates | all(.status == "passed" and .timed_out == false))
              else
-               (.gates | all(if .id == "release.namespace" or .id == "coverage.all-surfaces" then
+               (.gates | all(if .id == "release.namespace" then
                               .status == "failed" and .timed_out == false
                             else
                               .status == "passed" and .timed_out == false

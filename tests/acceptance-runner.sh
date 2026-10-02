@@ -3,8 +3,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export THREETERM_ACCEPTANCE_LIBRARY_ONLY=true
+export THREETERM_ACCEPTANCE_SCOPE=full
 export THREETERM_ACCEPTANCE_GATE_TIMEOUT_SECONDS=1
 export THREETERM_ACCEPTANCE_GATE_KILL_GRACE_SECONDS=1
+
+# A headless runner defers the graphical gate to the required three-journey
+# workflow, but still executes and records release-namespace failures.
+THREETERM_ACCEPTANCE_SCOPE=native bash -e -u -o pipefail -c '
+    source "$1/.github/scripts/acceptance.sh"
+    run_gate coverage.all-surfaces "must be deferred" false
+    [[ "${#GATE_IDS[@]}" -eq 0 ]]
+    run_gate release.namespace "must remain required" false
+    [[ "${GATE_IDS[0]}" == release.namespace ]]
+    [[ "${GATE_STATUSES[0]}" == failed ]]
+    [[ "${FAILURE_COUNT}" -eq 1 ]]
+' _ "${ROOT}"
 
 # shellcheck source=/dev/null
 source "${ROOT}/.github/scripts/acceptance.sh"
@@ -50,5 +63,9 @@ run_gate test.after 'a later gate still executes after timeout' true
 [[ "${GATE_IDS[1]}" == test.after ]]
 [[ "${GATE_STATUSES[1]}" == passed ]]
 [[ "${GATE_TIMED_OUT[1]}" == false ]]
+
+run_gate coverage.all-surfaces 'full acceptance still requires graphical coverage' true
+[[ "${GATE_IDS[2]}" == coverage.all-surfaces ]]
+[[ "${GATE_STATUSES[2]}" == passed ]]
 
 printf '%s\n' 'acceptance runner contract satisfied'

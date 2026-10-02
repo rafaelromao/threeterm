@@ -47,6 +47,8 @@ jobs:
       - name: Create or update the release pull request
         uses: googleapis/release-please-action@v4
         with:
+          # App/PAT credentials allow PR checks to run without workflow approval.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
